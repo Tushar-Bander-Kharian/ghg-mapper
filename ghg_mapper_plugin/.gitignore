@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.env
+*.zip
+data/raw/
+data/processed/
+data/outputs/
+*.tif
+*.tiff
+*.gpkg
+*.nc
+*.h5
+.qgis2/
