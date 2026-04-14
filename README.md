@@ -14,7 +14,7 @@ dialog — no Python coding required.
 
 Built on the workflow described in:  
 > Bander, T. (2024). *Multi-Satellite GHG Emission Hotspot Mapping over Agricultural India.*  
-> Amity University, Noida.
+
 
 ---
 
