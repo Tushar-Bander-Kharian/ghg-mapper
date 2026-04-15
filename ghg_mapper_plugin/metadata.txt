@@ -1,0 +1,22 @@
+[general]
+name=GHG Mapper — Agricultural India
+qgisMinimumVersion=3.22
+qgisMaximumVersion=4.99
+description=Multi-satellite GHG hotspot mapping with SOC/SIC ground-truth integration for agricultural India. No coding required.
+version=0.1.0
+author=Tushar Bander
+email=tusharkumar557@gmail.com
+about=Maps CH4 and CO2 emission hotspots over agricultural India by merging TROPOMI,
+    OCO-2/3, and GOSAT satellite retrievals via Google Earth Engine. Validates against
+    CPCB CAAQMS ground stations. Accepts user-supplied SOC and SIC field values through
+    a point-and-click UI — no Python coding needed. Outputs monthly composite GeoTIFFs,
+    hotspot shapefiles, and a carbon stock comparison table.
+
+tracker=https://github.com/tusharbander/ghg-mapper/issues
+repository=https://github.com/tusharbander/ghg-mapper
+tags=GHG,carbon,methane,CO2,TROPOMI,OCO-2,soil organic carbon,SOC,SIC,agriculture,India,remote sensing,CAAQMS
+homepage=https://github.com/tusharbander/ghg-mapper
+category=Raster
+icon=icon.png
+experimental=True
+deprecated=False
