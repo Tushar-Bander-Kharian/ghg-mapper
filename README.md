@@ -2,7 +2,12 @@
 
 **Multi-satellite GHG hotspot mapping with SOC/SIC ground-truth integration.**  
 A QGIS plugin + Python backend for no-code satellite emission analysis.
+## Compatibility
 
+| Version | QGIS | Qt | Python |
+|---------|------|----|--------|
+| 1.1.0   | 4.0+ | Qt6 / PyQt6 | 3.12+ |
+| 0.1.0   | 3.22–3.99 | Qt5 / PyQt5 | 3.9+ |
 ---
 
 ## What it does
@@ -11,6 +16,11 @@ GHG Mapper merges retrievals from TROPOMI (CH₄), OCO-2/OCO-3 (XCO₂), and GOS
 (XCO₂ + XCH₄) into monthly composite hotspot maps over agricultural India.
 It integrates your field-measured SOC and SIC values through a point-and-click
 dialog — no Python coding required.
+- Validates hotspots against CPCB CAAQMS ground stations — load your 
+  5-year continuous monitoring CSV (PM10, PM2.5, SO2, NO, NO2, NOX, NH3, 
+  CO, O3, Benzene, Toluene, Ethylbenzene, MP-Xylene, O-Xylene + met variables) 
+  directly through the point-and-click UI. Outputs RMSE, mean bias, and 
+  Pearson r per pollutant per station.
 
 Built on the workflow described in:  
 > Bander, T. (2024). *Multi-Satellite GHG Emission Hotspot Mapping over Agricultural India.*  
@@ -112,6 +122,20 @@ and India's emerging CCTS framework.
 
 **Connection to policy/market**: Outputs are structured to support MRV (Measurement,
 Reporting, Verification) workflows under Verra VCS and India's domestic carbon market.
+
+## Changelog
+
+### v1.1.0 (April 2026)
+- Ported to QGIS 4.0 / Qt6: all PyQt5 imports replaced with `qgis.PyQt`
+- Fixed `QHeaderView.Stretch` → `QHeaderView.ResizeMode.Stretch` (Qt6 enum)
+- Fixed `QFormLayout.setToolTip` → moved to parent `QGroupBox`
+- Added **CAAQMS Validation tab**: load CPCB continuous monitoring CSV,
+  preview 14 pollutants + 6 met variables, compute uncertainty metrics
+
+### v0.1.0 (initial release)
+- TROPOMI / OCO-2/3 / GOSAT composite pipeline via GEE
+- SOC/SIC ground truth integration with Walkley-Black correction
+- Hotspot detection at 90th percentile threshold
 
 ---
 
