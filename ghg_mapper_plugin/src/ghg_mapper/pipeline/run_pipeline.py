@@ -341,10 +341,18 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
     for short_name, version, label in datasets:
         urls = _cmr_direct_data_urls(short_name, version, start, end, bbox,
                                      max_granules=8)
-        _p(f"OCO: {label} — {len(urls)} granule(s) found via CMR.")
+        _p(f"OCO: {label} — {len(urls)} granule(s) found via CMR "
+           f"(short_name={short_name!r} version={version!r}).")
+        # If versioned search returns nothing, retry without a version constraint.
+        # GOSAT ACOS version strings vary across archive epochs (e.g. '9r', 'v9r',
+        # '10r') — a version-free search finds granules regardless of epoch.
+        if not urls and version:
+            _p(f"OCO: {label} — retrying CMR search without version constraint …")
+            urls = _cmr_direct_data_urls(short_name, "", start, end, bbox,
+                                         max_granules=8)
+            _p(f"OCO: {label} — {len(urls)} granule(s) found (no version filter).")
         if not urls:
-            _p(f"⚠  {label}: no granules found in CMR for this AOI / date range. "
-               f"(short_name={short_name!r} version={version!r})")
+            _p(f"⚠  {label}: no granules found in CMR for this AOI / date range.")
         for u in urls:
             labelled_urls.append((label, u))
 
@@ -443,12 +451,13 @@ def _cmr_direct_data_urls(short_name: str, version: str,
     west, south, east, north = bbox
     params = {
         "short_name":   short_name,
-        "version":      version,
         "temporal[]":   f"{start}T00:00:00Z,{end}T23:59:59Z",
         "bounding_box": f"{west},{south},{east},{north}",
         "page_size":    max_granules,
         "sort_key":     "start_date",
     }
+    if version:
+        params["version"] = version
     try:
         resp = requests.get(NASA_CMR_SEARCH, params=params, timeout=30)
         resp.raise_for_status()
@@ -726,26 +735,64 @@ def _stage_gosat_ch4_nies(start: str, end: str, bbox: list, out_dir: Path,
         _p(f"❌  GOSAT XCH₄: SFTP connection failed: {e}")
         return None
 
-    # ── Discover actual directory structure ───────────────────────────────
-    # The NIES SFTP layout is not publicly documented; probe three levels from
-    # root so we can find the correct data path regardless of server version.
+    # ── Discover the user's actual working directory ─────────────────────
+    # NIES SFTP server uses a chroot jail. sftp.listdir("/") shows the chroot
+    # root (typically ['pub','dev','etc']) but all those dirs are Permission
+    # Denied. The real data lives relative to the user's home inside the jail.
+    # getcwd() returns the home path; we probe from there with relative paths.
     try:
-        root_entries = sftp.listdir("/")
-        _p(f"GOSAT XCH₄: SFTP root contents: {root_entries}")
-        for top in root_entries:
-            try:
-                sub = sftp.listdir(f"/{top}")
-                _p(f"GOSAT XCH₄:   /{top}/ → {sub[:10]}")
-                for mid in sub[:5]:
-                    try:
-                        deep = sftp.listdir(f"/{top}/{mid}")
-                        _p(f"GOSAT XCH₄:     /{top}/{mid}/ → {deep[:8]}")
-                    except Exception as e3:
-                        _p(f"GOSAT XCH₄:     /{top}/{mid}/ → (listdir error: {e3})")
-            except Exception as e2:
-                _p(f"GOSAT XCH₄:   /{top}/ → (listdir error: {e2})")
+        cwd = sftp.getcwd() or "."
+        _p(f"GOSAT XCH₄: SFTP working directory (getcwd): {cwd!r}")
     except Exception as e:
-        _p(f"GOSAT XCH₄: directory probe failed: {e}")
+        cwd = "."
+        _p(f"GOSAT XCH₄: getcwd failed ({e}), using '.'")
+
+    # Probe from home dir so we can log the real directory layout.
+    for probe in [cwd, ".", "pub", "data", "gosat", "GOSAT"]:
+        try:
+            entries = sftp.listdir(probe)
+            _p(f"GOSAT XCH₄: probe {probe!r} → {entries[:12]}")
+            for entry in entries[:6]:
+                child = f"{probe}/{entry}".lstrip("./")
+                child = child if child else entry
+                try:
+                    sub = sftp.listdir(child)
+                    _p(f"GOSAT XCH₄:   {child}/ → {sub[:8]}")
+                    for sub_entry in sub[:4]:
+                        grandchild = f"{child}/{sub_entry}"
+                        try:
+                            deep = sftp.listdir(grandchild)
+                            _p(f"GOSAT XCH₄:     {grandchild}/ → {deep[:6]}")
+                        except Exception as e3:
+                            _p(f"GOSAT XCH₄:     {grandchild}/ → (error: {e3})")
+                except Exception as e2:
+                    _p(f"GOSAT XCH₄:   {child}/ → (error: {e2})")
+        except Exception as e:
+            _p(f"GOSAT XCH₄: probe {probe!r} → (error: {e})")
+
+    # Build the base data path. NIES typically organises data as:
+    #   <home>/pub/gosat/SWIRFTS/NIES/L2/YYYY/YYYYMMDD/
+    # but if the chroot home IS the pub dir the leading segment differs.
+    # We check both and fall back to the relative path that resolves.
+    def _resolve_base() -> str:
+        candidates = [
+            "pub/gosat/SWIRFTS/NIES/L2",
+            "gosat/SWIRFTS/NIES/L2",
+            "SWIRFTS/NIES/L2",
+            "NIES/L2",
+            "L2",
+        ]
+        for c in candidates:
+            try:
+                sftp.stat(c)
+                _p(f"GOSAT XCH₄: using data base path {c!r}")
+                return c
+            except Exception:
+                pass
+        _p("GOSAT XCH₄: could not resolve data base path — will attempt default")
+        return "pub/gosat/SWIRFTS/NIES/L2"
+
+    data_base = _resolve_base()
 
     west, south, east, north = bbox
     all_lats: list = []
@@ -763,7 +810,7 @@ def _stage_gosat_ch4_nies(start: str, end: str, bbox: list, out_dir: Path,
             day = start_dt + timedelta(days=offset)
             day_str  = day.strftime("%Y%m%d")
             year_str = day.strftime("%Y")
-            remote_dir = f"/pub/gosat/SWIRFTS/NIES/L2/{year_str}/{day_str}"
+            remote_dir = f"{data_base}/{year_str}/{day_str}"
 
             try:
                 files = sftp.listdir(remote_dir)
