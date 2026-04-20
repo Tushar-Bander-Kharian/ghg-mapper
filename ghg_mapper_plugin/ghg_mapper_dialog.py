@@ -1,4 +1,4 @@
-﻿"""
+"""
 ghg_mapper_dialog.py
 
 Main dialog for GHG Mapper plugin.
@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox, QFormLayout, QDateEdit, QCheckBox, QProgressBar,
     QMessageBox, QSizePolicy, QSplitter
 )
-from qgis.PyQt.QtCore import Qt, QDate, QThread, pyqtSignal, QTimer
+from qgis.PyQt.QtCore import Qt, QDate, QThread, pyqtSignal, QTimer, QSettings
 from qgis.PyQt.QtGui import QFont, QColor
 
 from qgis.core import (
@@ -49,27 +49,51 @@ class PipelineWorker(QThread):
 
     def run(self):
         try:
-            # Import here so QGIS startup is not slowed
-            import sys, os
-            # Add src/ to path so we can import ghg_mapper business logic
-            src_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "src")
+            import sys, os, importlib.util
+            _run_pipeline_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'src', 'ghg_mapper', 'pipeline', 'run_pipeline.py'
             )
-            if src_path not in sys.path:
-                sys.path.insert(0, src_path)
-
-            from ghg_mapper.pipeline.run_pipeline import run_full_pipeline
-            run_full_pipeline(
-                config=self.config,
-                log_fn=self.log_signal.emit,
-                progress_fn=self.progress_signal.emit,
+            _spec = importlib.util.spec_from_file_location(
+                "ghg_mapper.pipeline.run_pipeline", _run_pipeline_path
             )
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules["ghg_mapper.pipeline.run_pipeline"] = _mod
+            sys.modules["ghg_mapper"] = _mod
+            sys.modules["ghg_mapper.pipeline"] = _mod
+            _spec.loader.exec_module(_mod)
+            run_full_pipeline = _mod.run_full_pipeline
+            PipelineConfig    = _mod.PipelineConfig
+            bbox = self.config["bbox"]
+            sats = self.config.get("satellites", {})
+            cfg = PipelineConfig(
+                start_date       = self.config["date_start"],
+                end_date         = self.config["date_end"],
+                aoi_west         = bbox["west"],
+                aoi_east         = bbox["east"],
+                aoi_south        = bbox["south"],
+                aoi_north        = bbox["north"],
+                output_dir       = self.config["output_dir"],
+                gee_project      = self.config["gee_project"],
+                grid_res         = self.config.get("grid_res", 0.1),
+                use_tropomi      = sats.get("tropomi", True),
+                use_oco2         = sats.get("oco2", True),
+                use_oco3         = sats.get("oco3", True),
+                use_gosat        = sats.get("gosat", True),
+                earthdata_user   = self.config.get("earthdata_user"),
+                earthdata_pass   = self.config.get("earthdata_pass"),
+                soc_records      = self.config.get("soil_records", []),
+                caaqms_csv       = self.config.get("caaqms_dir", None),
+                wb_correction    = True,
+            )
+            def _progress(pct, msg):
+                self.progress_signal.emit(pct)
+                self.log_signal.emit(msg)
+            run_full_pipeline(cfg, progress_fn=_progress)
             self.finished_signal.emit(True, self.config["output_dir"])
         except Exception as e:
             self.log_signal.emit(f"\n[ERROR] {e}\n{traceback.format_exc()}")
             self.finished_signal.emit(False, "")
-
-
 # ---------------------------------------------------------------------------
 # Main Dialog
 # ---------------------------------------------------------------------------
@@ -79,6 +103,9 @@ class GHGMapperDialog(QDialog):
     # Default India bounding box
     DEFAULT_BBOX = {"west": 68.0, "south": 8.0, "east": 97.5, "north": 37.6}
 
+    SETTINGS_ORG  = "GHGMapper"
+    SETTINGS_APP  = "ghg_mapper"
+
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
@@ -86,6 +113,7 @@ class GHGMapperDialog(QDialog):
         self.setWindowTitle("GHG Mapper — Agricultural India  v0.1")
         self.setMinimumSize(820, 680)
         self._build_ui()
+        self._load_settings()      # restore saved credentials & paths
 
     # ------------------------------------------------------------------
     # UI construction
@@ -108,8 +136,8 @@ class GHGMapperDialog(QDialog):
         self.tabs.addTab(self._tab_setup(),        "① Setup")
         self.tabs.addTab(self._tab_ground_truth(), "② Ground Truth (SOC / SIC)")
         self.tabs.addTab(self._tab_caaqms(),       "③ CAAQMS Validation")
-        self.tabs.addTab(self._tab_run(),          "③ Run Pipeline")
-        self.tabs.addTab(self._tab_results(),      "④ Results")
+        self.tabs.addTab(self._tab_run(),          "④ Run Pipeline")
+        self.tabs.addTab(self._tab_results(),      "⑤ Results")
         root.addWidget(self.tabs)
 
         # Bottom buttons
@@ -152,6 +180,59 @@ class GHGMapperDialog(QDialog):
         gee_btn_row.addStretch()
         gee_form.addRow("", gee_btn_row)
         layout.addWidget(gee_box)
+
+        # --- NASA EarthData (for OCO-2/3 via PyDAP / OPeNDAP) ---
+        nasa_box = QGroupBox("NASA EarthData Login (required for OCO-2 / OCO-3 XCO₂)")
+        nasa_form = QFormLayout(nasa_box)
+
+        nasa_info = QLabel(
+            "OCO-2 and OCO-3 data are <b>not</b> in Google Earth Engine. "
+            "They are streamed from NASA GES DISC via OPeNDAP using your free EarthData account "
+            "(same method as <a href='https://github.com/sagarlimbu0/NASA-OCO2-OCO3'>"
+            "NASA-OCO2-OCO3</a>)."
+        )
+        nasa_info.setWordWrap(True)
+        nasa_info.setOpenExternalLinks(True)
+        nasa_form.addRow(nasa_info)
+
+        self.earthdata_user_edit = QLineEdit()
+        self.earthdata_user_edit.setPlaceholderText("NASA EarthData username…")
+        self.earthdata_user_edit.setToolTip(
+            "Your NASA EarthData username.\n"
+            "Register free at https://urs.earthdata.nasa.gov/\n\n"
+            "Required packages (OSGeo4W Shell):\n"
+            "  pip install pydap requests"
+        )
+        nasa_form.addRow("EarthData username:", self.earthdata_user_edit)
+
+        self.earthdata_pass_edit = QLineEdit()
+        self.earthdata_pass_edit.setPlaceholderText("NASA EarthData password…")
+        self.earthdata_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        nasa_form.addRow("EarthData password:", self.earthdata_pass_edit)
+
+        # Try to pre-fill from ~/.netrc (same convention as the reference repo)
+        netrc_row = QHBoxLayout()
+        btn_load_netrc = QPushButton("Load from ~/.netrc")
+        btn_load_netrc.setToolTip(
+            "Auto-fill credentials from your ~/.netrc file.\n"
+            "Add an entry like:\n"
+            "  machine urs.earthdata.nasa.gov\n"
+            "  login YOUR_USERNAME\n"
+            "  password YOUR_PASSWORD"
+        )
+        btn_load_netrc.clicked.connect(self._load_earthdata_netrc)
+        self.netrc_status_lbl = QLabel("")
+        netrc_row.addWidget(btn_load_netrc)
+        netrc_row.addWidget(self.netrc_status_lbl)
+        netrc_row.addStretch()
+        nasa_form.addRow("", netrc_row)
+
+        nasa_link = QLabel(
+            '<a href="https://urs.earthdata.nasa.gov/">Register / manage account at urs.earthdata.nasa.gov</a>'
+        )
+        nasa_link.setOpenExternalLinks(True)
+        nasa_form.addRow("", nasa_link)
+        layout.addWidget(nasa_box)
 
         # --- Satellites to use ---
         sat_box = QGroupBox("Satellite Data Sources")
@@ -737,6 +818,60 @@ class GHGMapperDialog(QDialog):
     # GEE Authentication
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Persistent settings  (QSettings → Windows registry / INI file)
+    # ------------------------------------------------------------------
+
+    def _load_settings(self):
+        """Restore saved credentials and paths on dialog open."""
+        s = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+
+        gee_project = s.value("gee/project", "")
+        if gee_project:
+            self.gee_project_edit.setText(gee_project)
+
+        ed_user = s.value("earthdata/username", "")
+        ed_pass = s.value("earthdata/password", "")
+        if ed_user:
+            self.earthdata_user_edit.setText(ed_user)
+        if ed_pass:
+            self.earthdata_pass_edit.setText(ed_pass)
+
+        output_dir = s.value("paths/output_dir", "")
+        if output_dir:
+            self.output_dir_edit.setText(output_dir)
+
+    def _save_settings(self):
+        """Persist credentials and paths so they survive QGIS restarts."""
+        s = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+
+        s.setValue("gee/project",        self.gee_project_edit.text().strip())
+        s.setValue("earthdata/username",  self.earthdata_user_edit.text().strip())
+        s.setValue("earthdata/password",  self.earthdata_pass_edit.text())
+        s.setValue("paths/output_dir",    self.output_dir_edit.text().strip())
+
+    def _load_earthdata_netrc(self):
+        """Pre-fill EarthData credentials from ~/.netrc (same convention as the reference repo)."""
+        import netrc, os
+        netrc_path = os.path.join(os.path.expanduser("~"), ".netrc")
+        try:
+            creds = netrc.netrc(netrc_path).authenticators("urs.earthdata.nasa.gov")
+            if creds:
+                username, _, password = creds
+                self.earthdata_user_edit.setText(username)
+                self.earthdata_pass_edit.setText(password)
+                self.netrc_status_lbl.setText("✅ Loaded from .netrc")
+                self.netrc_status_lbl.setStyleSheet("color: #1e8449;")
+            else:
+                self.netrc_status_lbl.setText("⚠ No urs.earthdata.nasa.gov entry in .netrc")
+                self.netrc_status_lbl.setStyleSheet("color: #d35400;")
+        except FileNotFoundError:
+            self.netrc_status_lbl.setText("⚠ ~/.netrc not found")
+            self.netrc_status_lbl.setStyleSheet("color: #d35400;")
+        except Exception as e:
+            self.netrc_status_lbl.setText(f"⚠ {e}")
+            self.netrc_status_lbl.setStyleSheet("color: #c0392b;")
+
     def _on_gee_auth(self):
         try:
             import ee
@@ -847,7 +982,9 @@ class GHGMapperDialog(QDialog):
 
     def _build_config(self):
         return {
-            "gee_project":   self.gee_project_edit.text().strip(),
+            "gee_project":      self.gee_project_edit.text().strip(),
+            "earthdata_user":   self.earthdata_user_edit.text().strip() or None,
+            "earthdata_pass":   self.earthdata_pass_edit.text() or None,
             "satellites": {
                 "tropomi": self.chk_tropomi.isChecked(),
                 "oco2":    self.chk_oco2.isChecked(),
@@ -871,6 +1008,7 @@ class GHGMapperDialog(QDialog):
         }
 
     def _on_run(self):
+        self._save_settings()      # persist before pipeline starts
         config = self._build_config()
 
         # Validate
@@ -899,7 +1037,7 @@ class GHGMapperDialog(QDialog):
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.tabs.setCurrentIndex(2)  # show Run tab
+        self.tabs.setCurrentIndex(3)  # show Run tab
 
         self.worker = PipelineWorker(config)
         self.worker.log_signal.connect(self.log)
@@ -923,7 +1061,7 @@ class GHGMapperDialog(QDialog):
                 f"Last run: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
                 f"Output folder: {output_dir}"
             )
-            self.tabs.setCurrentIndex(3)  # jump to Results tab
+            self.tabs.setCurrentIndex(4)  # jump to Results tab
             QMessageBox.information(
                 self, "Done",
                 "Pipeline finished successfully.\n\n"
@@ -933,6 +1071,10 @@ class GHGMapperDialog(QDialog):
             self.log("\n❌  Pipeline failed — see log above for details.")
             QMessageBox.critical(self, "Pipeline failed",
                                  "An error occurred. Check the pipeline log for details.")
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
     def _reset_run_buttons(self):
         self.btn_run.setEnabled(True)
