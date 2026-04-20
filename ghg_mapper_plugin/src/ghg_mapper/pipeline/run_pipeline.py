@@ -509,8 +509,37 @@ def _read_nc4_oco_vars(path: str):
     except ImportError:
         pass
 
+    # GDAL fallback — always bundled with QGIS/OSGeo4W, no pip install needed.
+    try:
+        from osgeo import gdal as _gdal
+        import numpy as _np2
+
+        def _gdal_var(var_name):
+            ds = _gdal.Open(f'NETCDF:"{path}":{var_name}')
+            if ds is None:
+                raise RuntimeError(f"GDAL could not open variable '{var_name}' in {path}")
+            arr = ds.ReadAsArray().flatten().astype(np.float64)
+            ds = None
+            return arr
+
+        xco2 = _gdal_var("xco2")
+        lat  = _gdal_var("latitude")
+        lon  = _gdal_var("longitude")
+        qf   = None
+        for qf_name in ("xco2_quality_flag", "quality_flag"):
+            try:
+                qf = _gdal_var(qf_name).astype(np.int32)
+                break
+            except Exception:
+                continue
+        if qf is None:
+            raise KeyError(f"No quality-flag variable found via GDAL in {path}")
+        return xco2, lat, lon, qf
+    except ImportError:
+        pass
+
     raise RuntimeError(
-        "Cannot read NC4 file: neither h5py nor netCDF4 is available. "
+        "Cannot read NC4 file: h5py, netCDF4, and osgeo.gdal are all unavailable. "
         "Run in OSGeo4W Shell:  pip install h5py"
     )
 
@@ -698,17 +727,23 @@ def _stage_gosat_ch4_nies(start: str, end: str, bbox: list, out_dir: Path,
         return None
 
     # ── Discover actual directory structure ───────────────────────────────
-    # The NIES SFTP layout is not publicly documented; probe two levels from
-    # root so we can find the correct path regardless of server version.
+    # The NIES SFTP layout is not publicly documented; probe three levels from
+    # root so we can find the correct data path regardless of server version.
     try:
         root_entries = sftp.listdir("/")
         _p(f"GOSAT XCH₄: SFTP root contents: {root_entries}")
         for top in root_entries:
             try:
                 sub = sftp.listdir(f"/{top}")
-                _p(f"GOSAT XCH₄:   /{top}/ → {sub[:8]}")
-            except Exception:
-                pass
+                _p(f"GOSAT XCH₄:   /{top}/ → {sub[:10]}")
+                for mid in sub[:5]:
+                    try:
+                        deep = sftp.listdir(f"/{top}/{mid}")
+                        _p(f"GOSAT XCH₄:     /{top}/{mid}/ → {deep[:8]}")
+                    except Exception as e3:
+                        _p(f"GOSAT XCH₄:     /{top}/{mid}/ → (listdir error: {e3})")
+            except Exception as e2:
+                _p(f"GOSAT XCH₄:   /{top}/ → (listdir error: {e2})")
     except Exception as e:
         _p(f"GOSAT XCH₄: directory probe failed: {e}")
 
