@@ -697,6 +697,21 @@ def _stage_gosat_ch4_nies(start: str, end: str, bbox: list, out_dir: Path,
         _p(f"❌  GOSAT XCH₄: SFTP connection failed: {e}")
         return None
 
+    # ── Discover actual directory structure ───────────────────────────────
+    # The NIES SFTP layout is not publicly documented; probe two levels from
+    # root so we can find the correct path regardless of server version.
+    try:
+        root_entries = sftp.listdir("/")
+        _p(f"GOSAT XCH₄: SFTP root contents: {root_entries}")
+        for top in root_entries:
+            try:
+                sub = sftp.listdir(f"/{top}")
+                _p(f"GOSAT XCH₄:   /{top}/ → {sub[:8]}")
+            except Exception:
+                pass
+    except Exception as e:
+        _p(f"GOSAT XCH₄: directory probe failed: {e}")
+
     west, south, east, north = bbox
     all_lats: list = []
     all_lons: list = []
