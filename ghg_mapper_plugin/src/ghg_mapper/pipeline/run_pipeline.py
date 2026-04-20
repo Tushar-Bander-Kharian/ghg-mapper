@@ -324,17 +324,23 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
 
     # Build one authenticated session scoped to data.gesdisc.earthdata.nasa.gov.
     _p(f"OCO: authenticating with NASA EarthData as '{earthdata_user}' …")
+    session = None
     try:
         from pydap.cas.urs import setup_session
         session = setup_session(
             earthdata_user, earthdata_pass,
             check_url=labelled_urls[0][1],   # real data URL → cookies scoped correctly
         )
-        _p("OCO: NASA EarthData session established.")
     except Exception as e:
-        _p(f"⚠  OCO: pydap setup_session failed ({e}), falling back to basic-auth session.")
+        _p(f"⚠  OCO: pydap setup_session raised {e} — using basic-auth session.")
+
+    if session is None:
+        # setup_session can return None in some pydap versions without raising.
         session = _requests.Session()
         session.auth = (earthdata_user, earthdata_pass)
+        _p("OCO: using HTTP basic-auth session.")
+    else:
+        _p("OCO: NASA EarthData session established.")
 
     west, south, east, north = bbox
     all_lats: list = []
