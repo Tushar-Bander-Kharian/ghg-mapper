@@ -79,9 +79,11 @@ class PipelineWorker(QThread):
                 use_tropomi      = sats.get("tropomi", True),
                 use_oco2         = sats.get("oco2", True),
                 use_oco3         = sats.get("oco3", True),
-                use_gosat        = sats.get("gosat", True),
+                use_gosat        = sats.get("gosat", True) or sats.get("gosat_ch4", True),
                 earthdata_user   = self.config.get("earthdata_user"),
                 earthdata_pass   = self.config.get("earthdata_pass"),
+                nies_user        = self.config.get("nies_user"),
+                nies_pass        = self.config.get("nies_pass"),
                 soc_records      = self.config.get("soil_records", []),
                 caaqms_csv       = self.config.get("caaqms_dir", None),
                 wb_correction    = True,
@@ -233,17 +235,98 @@ class GHGMapperDialog(QDialog):
         nasa_link.setOpenExternalLinks(True)
         nasa_form.addRow("", nasa_link)
         layout.addWidget(nasa_box)
+        self.earthdata_user_edit.textChanged.connect(self._update_sat_availability)
+        self.earthdata_pass_edit.textChanged.connect(self._update_sat_availability)
+
+        # --- NIES GOSAT XCH₄ credentials ---
+        nies_box = QGroupBox("NIES GOSAT Login (optional — for GOSAT XCH₄)")
+        nies_form = QFormLayout(nies_box)
+
+        nies_info = QLabel(
+            "GOSAT XCH₄ data is provided by Japan's National Institute for Environmental Studies (NIES) "
+            "via SFTP. Register free at "
+            "<a href='https://data2.gosat.nies.go.jp/'>data2.gosat.nies.go.jp</a>. "
+            "Your login is your registered <b>email address</b> and the password you chose. "
+            "Requires: <code>pip install paramiko</code>"
+        )
+        nies_info.setWordWrap(True)
+        nies_info.setOpenExternalLinks(True)
+        nies_form.addRow(nies_info)
+
+        self.nies_user_edit = QLineEdit()
+        self.nies_user_edit.setPlaceholderText("NIES registered email address…")
+        self.nies_user_edit.setToolTip(
+            "The email address you used to register at data2.gosat.nies.go.jp.\n"
+            "This is your SFTP username for prdct.gosat-2.nies.go.jp."
+        )
+        nies_form.addRow("NIES username (email):", self.nies_user_edit)
+
+        self.nies_pass_edit = QLineEdit()
+        self.nies_pass_edit.setPlaceholderText("NIES password…")
+        self.nies_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.nies_pass_edit.setToolTip("Password you set when registering on the NIES GOSAT portal.")
+        nies_form.addRow("NIES password:", self.nies_pass_edit)
+
+        nies_status_row = QHBoxLayout()
+        btn_test_nies = QPushButton("Test NIES connection")
+        btn_test_nies.setToolTip("Verify SFTP credentials by connecting to prdct.gosat-2.nies.go.jp.")
+        btn_test_nies.clicked.connect(self._test_nies_connection)
+        self.nies_status_lbl = QLabel("")
+        nies_status_row.addWidget(btn_test_nies)
+        nies_status_row.addWidget(self.nies_status_lbl)
+        nies_status_row.addStretch()
+        nies_form.addRow("", nies_status_row)
+
+        nies_link = QLabel(
+            '<a href="https://data2.gosat.nies.go.jp/">Register at data2.gosat.nies.go.jp</a>'
+            '  |  '
+            '<a href="https://prdct.gosat-2.nies.go.jp/en/aboutdata/">SFTP access guide</a>'
+        )
+        nies_link.setOpenExternalLinks(True)
+        nies_form.addRow("", nies_link)
+        layout.addWidget(nies_box)
+        self.nies_user_edit.textChanged.connect(self._update_sat_availability)
+        self.nies_pass_edit.textChanged.connect(self._update_sat_availability)
 
         # --- Satellites to use ---
-        sat_box = QGroupBox("Satellite Data Sources")
+        sat_box = QGroupBox("Satellite Data Sources  (pipeline requires ≥ 2 enabled sources)")
         sat_layout = QVBoxLayout(sat_box)
-        self.chk_tropomi = QCheckBox("TROPOMI / Sentinel-5P  — CH₄  (daily, ~5.5×7 km)")
-        self.chk_oco2    = QCheckBox("OCO-2  — XCO₂  (16-day, ~1.3×2.25 km)")
-        self.chk_oco3    = QCheckBox("OCO-3  — XCO₂  (ISS orbit, variable)")
-        self.chk_gosat   = QCheckBox("GOSAT  — XCO₂ + XCH₄  (3-day, ~10 km)")
-        for chk in [self.chk_tropomi, self.chk_oco2, self.chk_oco3, self.chk_gosat]:
+
+        avail_note = QLabel(
+            "<i>Sources marked <b>[GEE]</b> only need a GEE project. "
+            "Sources marked <b>[EarthData]</b> need NASA credentials above. "
+            "Sources marked <b>[NIES]</b> need NIES credentials above.</i>"
+        )
+        avail_note.setWordWrap(True)
+        sat_layout.addWidget(avail_note)
+
+        self.chk_tropomi = QCheckBox("✅  TROPOMI / Sentinel-5P  — CH₄  (daily, ~5.5×7 km)  [GEE]")
+        self.chk_oco2    = QCheckBox("✅  OCO-2  — XCO₂  (16-day, ~1.3×2.25 km)  [EarthData]")
+        self.chk_oco3    = QCheckBox("✅  OCO-3  — XCO₂  (ISS orbit, variable)  [EarthData]")
+        self.chk_gosat   = QCheckBox("✅  GOSAT  — XCO₂ (ACOS/GES DISC)  [EarthData]")
+        self.chk_gosat_ch4 = QCheckBox("✅  GOSAT  — XCH₄ (NIES TANSO-FTS)  [NIES]")
+
+        self.chk_tropomi.setToolTip("Sentinel-5P TROPOMI methane (CH₄). Requires only GEE access.")
+        self.chk_oco2.setToolTip("OCO-2 XCO₂. Requires NASA EarthData credentials.")
+        self.chk_oco3.setToolTip("OCO-3 XCO₂ from ISS. Requires NASA EarthData credentials.")
+        self.chk_gosat.setToolTip("GOSAT ACOS L2 XCO₂ from NASA GES DISC. Requires EarthData credentials.")
+        self.chk_gosat_ch4.setToolTip(
+            "GOSAT TANSO-FTS XCH₄ from NIES SFTP portal.\n"
+            "Requires NIES credentials and: pip install paramiko"
+        )
+        for chk in [self.chk_tropomi, self.chk_oco2, self.chk_oco3,
+                    self.chk_gosat, self.chk_gosat_ch4]:
             chk.setChecked(True)
             sat_layout.addWidget(chk)
+
+        self.sat_avail_label = QLabel("")
+        self.sat_avail_label.setWordWrap(True)
+        sat_layout.addWidget(self.sat_avail_label)
+
+        # update availability label when any checkbox or credential changes
+        for chk in [self.chk_tropomi, self.chk_oco2, self.chk_oco3,
+                    self.chk_gosat, self.chk_gosat_ch4]:
+            chk.stateChanged.connect(self._update_sat_availability)
         layout.addWidget(sat_box)
 
         # --- Area of Interest ---
@@ -746,13 +829,14 @@ class GHGMapperDialog(QDialog):
         info.setStyleSheet("padding: 6px; background: #fef9e7; border-radius: 4px;")
         layout.addWidget(info)
 
-        self.btn_load_ch4   = self._result_btn("🗺  Load CH₄ composite (GeoTIFF)",   self._load_ch4)
-        self.btn_load_co2   = self._result_btn("🗺  Load XCO₂ composite (GeoTIFF)",  self._load_co2)
-        self.btn_load_hotspot = self._result_btn("📌  Load hotspot shapefile",        self._load_hotspot)
-        self.btn_load_soc   = self._result_btn("🟤  Load SOC point layer",            self._load_soc)
-        self.btn_open_dir   = self._result_btn("📁  Open output folder in explorer",  self._open_output_dir)
+        self.btn_load_ch4       = self._result_btn("🗺  Load CH₄ composite — TROPOMI/Sentinel-5P (GeoTIFF)", self._load_ch4)
+        self.btn_load_co2       = self._result_btn("🗺  Load XCO₂ composite — OCO-2/3 + GOSAT ACOS (GeoTIFF)", self._load_co2)
+        self.btn_load_gosat_ch4 = self._result_btn("🛰  Load XCH₄ composite — GOSAT NIES (GeoTIFF)", self._load_gosat_ch4)
+        self.btn_load_hotspot   = self._result_btn("📌  Load hotspot shapefile", self._load_hotspot)
+        self.btn_load_soc       = self._result_btn("🟤  Load SOC point layer",   self._load_soc)
+        self.btn_open_dir       = self._result_btn("📁  Open output folder in explorer", self._open_output_dir)
 
-        for btn in [self.btn_load_ch4, self.btn_load_co2,
+        for btn in [self.btn_load_ch4, self.btn_load_co2, self.btn_load_gosat_ch4,
                     self.btn_load_hotspot, self.btn_load_soc, self.btn_open_dir]:
             layout.addWidget(btn)
 
@@ -837,6 +921,13 @@ class GHGMapperDialog(QDialog):
         if ed_pass:
             self.earthdata_pass_edit.setText(ed_pass)
 
+        nies_user = s.value("nies/username", "")
+        nies_pass = s.value("nies/password", "")
+        if nies_user:
+            self.nies_user_edit.setText(nies_user)
+        if nies_pass:
+            self.nies_pass_edit.setText(nies_pass)
+
         output_dir = s.value("paths/output_dir", "")
         if output_dir:
             self.output_dir_edit.setText(output_dir)
@@ -848,7 +939,69 @@ class GHGMapperDialog(QDialog):
         s.setValue("gee/project",        self.gee_project_edit.text().strip())
         s.setValue("earthdata/username",  self.earthdata_user_edit.text().strip())
         s.setValue("earthdata/password",  self.earthdata_pass_edit.text())
+        s.setValue("nies/username",       self.nies_user_edit.text().strip())
+        s.setValue("nies/password",       self.nies_pass_edit.text())
         s.setValue("paths/output_dir",    self.output_dir_edit.text().strip())
+
+    def _update_sat_availability(self):
+        """Recount credentialled sources and update the status label."""
+        has_earthdata = bool(self.earthdata_user_edit.text().strip()
+                             and self.earthdata_pass_edit.text())
+        has_nies = bool(self.nies_user_edit.text().strip()
+                        and self.nies_pass_edit.text())
+        available = []
+        if self.chk_tropomi.isChecked():
+            available.append("TROPOMI")
+        if self.chk_oco2.isChecked() and has_earthdata:
+            available.append("OCO-2")
+        if self.chk_oco3.isChecked() and has_earthdata:
+            available.append("OCO-3")
+        if self.chk_gosat.isChecked() and has_earthdata:
+            available.append("GOSAT XCO₂")
+        if self.chk_gosat_ch4.isChecked() and has_nies:
+            available.append("GOSAT XCH₄")
+
+        n = len(available)
+        if n >= 2:
+            self.sat_avail_label.setText(
+                f"<span style='color:#1e8449'>✅  {n} source(s) available: "
+                f"{', '.join(available)} — pipeline can run.</span>"
+            )
+        else:
+            missing = []
+            if not has_earthdata:
+                missing.append("add EarthData credentials for OCO/GOSAT XCO₂")
+            if not has_nies:
+                missing.append("add NIES credentials for GOSAT XCH₄")
+            hint = "; or ".join(missing) if missing else "enable more sources"
+            self.sat_avail_label.setText(
+                f"<span style='color:#c0392b'>⚠  Only {n} source(s) available "
+                f"({', '.join(available) or 'none'}). Need ≥2 — {hint}.</span>"
+            )
+
+    def _test_nies_connection(self):
+        user = self.nies_user_edit.text().strip()
+        pwd  = self.nies_pass_edit.text()
+        if not user or not pwd:
+            self.nies_status_lbl.setText("⚠ Enter username and password first.")
+            self.nies_status_lbl.setStyleSheet("color: #d35400;")
+            return
+        self.nies_status_lbl.setText("Connecting…")
+        self.nies_status_lbl.setStyleSheet("color: #5d6d7e;")
+        try:
+            import paramiko
+            t = paramiko.Transport(("prdct.gosat-2.nies.go.jp", 22))
+            t.connect(username=user, password=pwd)
+            t.close()
+            self.nies_status_lbl.setText("✅  Connected successfully")
+            self.nies_status_lbl.setStyleSheet("color: #1e8449;")
+            self._update_sat_availability()
+        except ImportError:
+            self.nies_status_lbl.setText("❌  paramiko not installed — run: pip install paramiko")
+            self.nies_status_lbl.setStyleSheet("color: #c0392b;")
+        except Exception as e:
+            self.nies_status_lbl.setText(f"❌  {e}")
+            self.nies_status_lbl.setStyleSheet("color: #c0392b;")
 
     def _load_earthdata_netrc(self):
         """Pre-fill EarthData credentials from ~/.netrc (same convention as the reference repo)."""
@@ -985,11 +1138,14 @@ class GHGMapperDialog(QDialog):
             "gee_project":      self.gee_project_edit.text().strip(),
             "earthdata_user":   self.earthdata_user_edit.text().strip() or None,
             "earthdata_pass":   self.earthdata_pass_edit.text() or None,
+            "nies_user":        self.nies_user_edit.text().strip() or None,
+            "nies_pass":        self.nies_pass_edit.text() or None,
             "satellites": {
-                "tropomi": self.chk_tropomi.isChecked(),
-                "oco2":    self.chk_oco2.isChecked(),
-                "oco3":    self.chk_oco3.isChecked(),
-                "gosat":   self.chk_gosat.isChecked(),
+                "tropomi":    self.chk_tropomi.isChecked(),
+                "oco2":       self.chk_oco2.isChecked(),
+                "oco3":       self.chk_oco3.isChecked(),
+                "gosat":      self.chk_gosat.isChecked(),
+                "gosat_ch4":  self.chk_gosat_ch4.isChecked(),
             },
             "bbox": {
                 "west":  self.west_spin.value(),
@@ -1017,8 +1173,32 @@ class GHGMapperDialog(QDialog):
             errors.append("GEE Project ID is required (Setup tab).")
         if not config["output_dir"]:
             errors.append("Output directory is required (Setup tab).")
-        if not any(config["satellites"].values()):
-            errors.append("Select at least one satellite (Setup tab).")
+
+        # Count credentialled + checked sources
+        sats = config["satellites"]
+        has_earthdata = bool(config.get("earthdata_user") and config.get("earthdata_pass"))
+        has_nies      = bool(config.get("nies_user") and config.get("nies_pass"))
+        available_sources = []
+        if sats.get("tropomi"):
+            available_sources.append("TROPOMI/Sentinel-5P")
+        if sats.get("oco2") and has_earthdata:
+            available_sources.append("OCO-2")
+        if sats.get("oco3") and has_earthdata:
+            available_sources.append("OCO-3")
+        if sats.get("gosat") and has_earthdata:
+            available_sources.append("GOSAT XCO₂")
+        if sats.get("gosat_ch4") and has_nies:
+            available_sources.append("GOSAT XCH₄")
+
+        if len(available_sources) < 2:
+            errors.append(
+                f"At least 2 data sources with valid credentials are required to run.\n"
+                f"  Currently available: {', '.join(available_sources) or 'none'}\n"
+                f"  • TROPOMI needs only GEE project (always available if GEE is set)\n"
+                f"  • OCO-2 / OCO-3 / GOSAT XCO₂ need NASA EarthData credentials\n"
+                f"  • GOSAT XCH₄ needs NIES credentials"
+            )
+
         if errors:
             QMessageBox.warning(self, "Cannot run — missing settings",
                                 "\n".join(f"• {e}" for e in errors))
@@ -1119,10 +1299,13 @@ class GHGMapperDialog(QDialog):
             QMessageBox.critical(self, "Load failed", f"Could not load {filename}")
 
     def _load_ch4(self):
-        self._load_raster("ch4_composite.tif", "CH₄ Composite (TROPOMI)")
+        self._load_raster("ch4_composite.tif", "CH₄ Composite (TROPOMI/Sentinel-5P)")
 
     def _load_co2(self):
-        self._load_raster("xco2_composite.tif", "XCO₂ Composite (OCO-2/3 + GOSAT)")
+        self._load_raster("xco2_composite.tif", "XCO₂ Composite (OCO-2/3 + GOSAT ACOS)")
+
+    def _load_gosat_ch4(self):
+        self._load_raster("gosat_ch4_composite.tif", "XCH₄ Composite (GOSAT NIES)")
 
     def _load_hotspot(self):
         self._load_vector("ghg_hotspots.gpkg", "GHG Hotspots")
