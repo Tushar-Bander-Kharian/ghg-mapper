@@ -483,20 +483,20 @@ def _cmr_opendap_urls(short_name: str, version: str,
                 data_url = href
 
         if opendap_url is None and data_url:
-            # CMR data URLs now use data.gesdisc.earthdata.nasa.gov/data/.
-            # Map back to the known-working OPeNDAP server (oco2.gesdisc.eosdis.nasa.gov)
-            # which mirrors the reference repo's endpoint.
-            # Path structure is identical; only the host+prefix changes.
-            if "data.gesdisc.earthdata.nasa.gov/data/" in data_url:
-                opendap_url = data_url.replace(
-                    "data.gesdisc.earthdata.nasa.gov/data/",
-                    "oco2.gesdisc.eosdis.nasa.gov/opendap/",
-                )
-            elif "gesdisc.eosdis.nasa.gov/data/" in data_url:
-                opendap_url = data_url.replace(
-                    "gesdisc.eosdis.nasa.gov/data/",
-                    "oco2.gesdisc.eosdis.nasa.gov/opendap/",
-                )
+            # CMR data URLs look like:
+            #   data.gesdisc.earthdata.nasa.gov/data/OCO2_DATA/OCO2_L2_Lite_FP.11.2r/YYYY/file.nc4
+            # The old OPeNDAP server omits the intermediate *_DATA/ collection dir:
+            #   oco2.gesdisc.eosdis.nasa.gov/opendap/OCO2_L2_Lite_FP.11.2r/YYYY/file.nc4
+            # Strip host+/data/ prefix, remove the leading *_DATA/ segment, then
+            # prepend the OPeNDAP root.
+            import re as _re
+            for _pfx in ("data.gesdisc.earthdata.nasa.gov/data/",
+                         "gesdisc.eosdis.nasa.gov/data/"):
+                if _pfx in data_url:
+                    _tail = data_url.split(_pfx, 1)[1]
+                    _tail = _re.sub(r'^[A-Z0-9]+_DATA/', '', _tail)
+                    opendap_url = NASA_OPENDAP_ROOT + _tail
+                    break
 
         # Final guard: only accept URLs that point to an actual granule file.
         # Directory-style URLs (no .nc4/.nc suffix) cause PyDAP to fetch
