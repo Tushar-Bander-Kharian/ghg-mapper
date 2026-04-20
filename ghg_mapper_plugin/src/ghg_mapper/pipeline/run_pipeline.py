@@ -37,7 +37,7 @@ DEFAULT_GRID_DEG         = 0.1            # ~11 km grid
 GEE_TROPOMI_CH4  = "COPERNICUS/S5P/OFFL/L3_CH4"
 GEE_S5P_NO2      = "COPERNICUS/S5P/OFFL/L3_NO2"   # CAAQMS co-tracer validation
 
-# NASA GES DISC — OCO-2/3 L2 Lite FP (NOT in GEE; streamed via PyDAP / OPeNDAP)
+# NASA GES DISC — OCO-2/3 and GOSAT ACOS XCO2 (direct HTTPS download + h5py)
 # Approach mirrors: https://github.com/sagarlimbu0/NASA-OCO2-OCO3
 NASA_CMR_SEARCH   = "https://cmr.earthdata.nasa.gov/search/granules.json"
 NASA_OPENDAP_ROOT = "https://oco2.gesdisc.eosdis.nasa.gov/opendap/"
@@ -46,6 +46,12 @@ OCO2_SHORT_NAME   = "OCO2_L2_Lite_FP"
 OCO2_VERSION      = "11.2r"
 OCO3_SHORT_NAME   = "OCO3_L2_Lite_FP"
 OCO3_VERSION      = "10.4r"
+# GOSAT ACOS L2 Lite — hosted on GES DISC, same EarthData auth as OCO-2/3.
+# quality_flag variable is "quality_flag" (not "xco2_quality_flag").
+GOSAT_SHORT_NAME  = "ACOS_L2_Lite_FP"
+GOSAT_VERSION     = "9r"
+# NIES GOSAT XCH4 — SFTP-only portal (prdct.gosat-2.nies.go.jp), separate credentials.
+NIES_SFTP_HOST    = "prdct.gosat-2.nies.go.jp"
 
 
 # ── config dataclass ───────────────────────────────────────────────────────
@@ -66,6 +72,8 @@ class PipelineConfig:
     use_gosat:        bool  = True
     earthdata_user:   Optional[str] = None   # NASA EarthData username  (urs.earthdata.nasa.gov)
     earthdata_pass:   Optional[str] = None   # NASA EarthData password
+    nies_user:        Optional[str] = None   # NIES GOSAT portal username (prdct.gosat-2.nies.go.jp)
+    nies_pass:        Optional[str] = None   # NIES GOSAT portal password
     soc_records:      List[dict] = field(default_factory=list)   # [{lat,lon,soc,sic}, ...]
     caaqms_csv:       Optional[str] = None
     wb_correction:    bool  = True
@@ -124,9 +132,9 @@ def run_full_pipeline(cfg: PipelineConfig,
             prog(10, "⚠  TROPOMI: no CH₄ images found for this AOI / date range. "
                      "Try widening the date range or check GEE collection availability.")
 
-        prog(25, "Fetching OCO-2 / OCO-3 XCO₂ (NASA GES DISC / OPeNDAP) …")
+        prog(25, "Fetching OCO-2 / OCO-3 / GOSAT XCO₂ (NASA GES DISC) …")
         xco2_local_path = None
-        if cfg.use_oco2 or cfg.use_oco3:
+        if cfg.use_oco2 or cfg.use_oco3 or cfg.use_gosat:
             if cfg.earthdata_user and cfg.earthdata_pass:
                 xco2_local_path = _stage_xco2_direct(
                     cfg.start_date, cfg.end_date,
@@ -136,14 +144,31 @@ def run_full_pipeline(cfg: PipelineConfig,
                     cfg.grid_res,
                     use_oco2=cfg.use_oco2,
                     use_oco3=cfg.use_oco3,
+                    use_gosat=cfg.use_gosat,
                     prog=prog,
                 )
                 if xco2_local_path is None:
-                    prog(25, "⚠  OCO-2/3: no retrievals found or download failed. "
+                    prog(25, "⚠  OCO-2/3/GOSAT: no retrievals found or download failed. "
                              "Check EarthData credentials and date range.")
             else:
-                prog(25, "⚠  OCO-2/3 skipped — no EarthData credentials. "
+                prog(25, "⚠  OCO-2/3/GOSAT skipped — no EarthData credentials. "
                          "Enter username/password in the Setup tab.")
+
+        prog(30, "Fetching GOSAT XCH₄ (NIES portal) …")
+        gosat_ch4_path = None
+        if cfg.use_gosat and cfg.nies_user and cfg.nies_pass:
+            gosat_ch4_path = _stage_gosat_ch4_nies(
+                cfg.start_date, cfg.end_date,
+                cfg.aoi_bounds, out,
+                cfg.nies_user, cfg.nies_pass,
+                cfg.grid_res, prog=prog,
+            )
+            if gosat_ch4_path is None:
+                prog(30, "⚠  GOSAT XCH₄: download failed or no data in AOI. "
+                         "Check NIES credentials.")
+        elif cfg.use_gosat:
+            prog(30, "⚠  GOSAT XCH₄ skipped — no NIES credentials. "
+                     "Register at https://prdct.gosat-2.nies.go.jp and enter credentials.")
 
         prog(38, "Building hotspot grid …")
         if ch4_img is None:
@@ -264,6 +289,7 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
                         earthdata_user: str, earthdata_pass: str,
                         grid_res: float,
                         use_oco2: bool = True, use_oco3: bool = True,
+                        use_gosat: bool = True,
                         prog: Optional[ProgressFn] = None) -> Optional[Path]:
     """
     Download OCO-2 and/or OCO-3 XCO₂ L2 Lite FP granules from NASA GES DISC
@@ -305,6 +331,10 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
         datasets.append((OCO2_SHORT_NAME, OCO2_VERSION, "OCO-2"))
     if use_oco3:
         datasets.append((OCO3_SHORT_NAME, OCO3_VERSION, "OCO-3"))
+    if use_gosat:
+        # GOSAT ACOS L2 Lite — same GES DISC auth as OCO; quality flag field
+        # is "quality_flag" (not "xco2_quality_flag").
+        datasets.append((GOSAT_SHORT_NAME, GOSAT_VERSION, "GOSAT"))
 
     # Collect direct data URLs from CMR (no OPeNDAP rewriting).
     labelled_urls: list = []
@@ -440,19 +470,29 @@ def _cmr_direct_data_urls(short_name: str, version: str,
 
 def _read_nc4_oco_vars(path: str):
     """
-    Read xco2, latitude, longitude, xco2_quality_flag from an OCO NC4 file.
-    Tries h5py first (always available in QGIS/OSGeo4W), then netCDF4.
-    Returns four flat numpy float64/int arrays.
+    Read xco2, latitude, longitude, quality_flag from an OCO-2/3 or GOSAT NC4 file.
+    Handles two quality-flag field names:
+      - OCO-2/3  : "xco2_quality_flag"
+      - GOSAT ACOS: "quality_flag"
+    Tries h5py first (bundled with QGIS/OSGeo4W), then netCDF4.
+    Returns four flat numpy arrays (float64, float64, float64, int32).
     """
     import numpy as np
+
+    def _pick_qf(keys):
+        for name in ("xco2_quality_flag", "quality_flag"):
+            if name in keys:
+                return name
+        raise KeyError(f"No quality-flag field found. Available: {list(keys)}")
 
     try:
         import h5py
         with h5py.File(path, "r") as f:
+            qf_key = _pick_qf(f.keys())
             xco2 = np.array(f["xco2"]).flatten().astype(np.float64)
             lat  = np.array(f["latitude"]).flatten().astype(np.float64)
             lon  = np.array(f["longitude"]).flatten().astype(np.float64)
-            qf   = np.array(f["xco2_quality_flag"]).flatten().astype(np.int32)
+            qf   = np.array(f[qf_key]).flatten().astype(np.int32)
         return xco2, lat, lon, qf
     except ImportError:
         pass
@@ -460,10 +500,11 @@ def _read_nc4_oco_vars(path: str):
     try:
         import netCDF4 as nc
         with nc.Dataset(path) as ds:
+            qf_key = _pick_qf(ds.variables.keys())
             xco2 = np.ma.filled(ds["xco2"][:], np.nan).flatten().astype(np.float64)
             lat  = np.ma.filled(ds["latitude"][:], np.nan).flatten().astype(np.float64)
             lon  = np.ma.filled(ds["longitude"][:], np.nan).flatten().astype(np.float64)
-            qf   = np.ma.filled(ds["xco2_quality_flag"][:], 1).flatten().astype(np.int32)
+            qf   = np.ma.filled(ds[qf_key][:], 1).flatten().astype(np.int32)
         return xco2, lat, lon, qf
     except ImportError:
         pass
@@ -606,6 +647,138 @@ def _cmr_opendap_urls(short_name: str, version: str,
                         opendap_url)
 
     return urls
+
+
+def _stage_gosat_ch4_nies(start: str, end: str, bbox: list, out_dir: Path,
+                           nies_user: str, nies_pass: str,
+                           grid_res: float,
+                           prog: Optional[ProgressFn] = None) -> Optional[Path]:
+    """
+    Download GOSAT TANSO-FTS XCH₄ L2 data from the NIES GOSAT Data Archive
+    Service (GDAS) via SFTP and write a gridded mean XCH₄ GeoTIFF.
+
+    NIES portal: https://prdct.gosat-2.nies.go.jp
+    Register at: https://prdct.gosat-2.nies.go.jp/en/aboutdata/directsftpaccess.html
+
+    Access protocol: SFTP (paramiko)
+    Path pattern   : /pub/gosat/SWIRFTS/NIES/L2/YYYYMMDD/
+    File pattern   : GOSAT_SWIRFTS_NIES_L2_<date>_*.h5
+
+    Variables (HDF5 path, NIES L2 v02.xx):
+      /Data/scanAttribute/latitude
+      /Data/scanAttribute/longitude
+      /Data/spectralFit/XCH4  (or /CH4/XCH4 depending on product version)
+      /Data/spectralFit/XCH4_quality  (0 = good)
+
+    Requires: pip install paramiko h5py
+    """
+    def _p(msg): prog(30, msg) if prog else log.info(msg)
+
+    try:
+        import paramiko
+    except ImportError:
+        _p("❌  GOSAT XCH₄: 'paramiko' not installed. "
+           "Run in OSGeo4W Shell:  pip install paramiko")
+        return None
+
+    import numpy as np
+    import tempfile
+    import os
+    from datetime import date, timedelta
+
+    _p(f"GOSAT XCH₄: connecting to NIES SFTP as '{nies_user}' …")
+
+    try:
+        transport = paramiko.Transport((NIES_SFTP_HOST, 22))
+        transport.connect(username=nies_user, password=nies_pass)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        _p("GOSAT XCH₄: NIES SFTP session established.")
+    except Exception as e:
+        _p(f"❌  GOSAT XCH₄: SFTP connection failed: {e}")
+        return None
+
+    west, south, east, north = bbox
+    all_lats: list = []
+    all_lons: list = []
+    all_ch4:  list = []
+
+    try:
+        # Walk day-by-day over the date range; limit to avoid very long runs.
+        start_dt = date.fromisoformat(start)
+        end_dt   = date.fromisoformat(end)
+        days_total = (end_dt - start_dt).days + 1
+        step = max(1, days_total // 30)   # sample ≤30 days across the range
+
+        for offset in range(0, days_total, step):
+            day = start_dt + timedelta(days=offset)
+            day_str  = day.strftime("%Y%m%d")
+            year_str = day.strftime("%Y")
+            remote_dir = f"/pub/gosat/SWIRFTS/NIES/L2/{year_str}/{day_str}"
+
+            try:
+                files = sftp.listdir(remote_dir)
+            except IOError:
+                continue   # directory may not exist (no overpass that day)
+
+            h5_files = [f for f in files if f.endswith(".h5")]
+            for fname in h5_files[:3]:   # at most 3 files per day
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tf:
+                        tmp_path = tf.name
+                    sftp.get(f"{remote_dir}/{fname}", tmp_path)
+
+                    import h5py
+                    with h5py.File(tmp_path, "r") as f:
+                        # Try both known variable path layouts.
+                        if "Data/spectralFit/XCH4" in f:
+                            ch4_raw = np.array(f["Data/spectralFit/XCH4"]).flatten()
+                            lat_raw = np.array(f["Data/scanAttribute/latitude"]).flatten()
+                            lon_raw = np.array(f["Data/scanAttribute/longitude"]).flatten()
+                            qf_raw  = np.array(f["Data/spectralFit/XCH4_quality"]).flatten()
+                        elif "CH4/XCH4" in f:
+                            ch4_raw = np.array(f["CH4/XCH4"]).flatten()
+                            lat_raw = np.array(f["CH4/latitude"]).flatten()
+                            lon_raw = np.array(f["CH4/longitude"]).flatten()
+                            qf_raw  = np.array(f["CH4/quality_flag"]).flatten()
+                        else:
+                            _p(f"⚠  GOSAT XCH₄: unrecognised HDF5 layout in {fname} — skipping.")
+                            continue
+
+                    mask = (
+                        (qf_raw == 0) &
+                        (lat_raw >= south) & (lat_raw <= north) &
+                        (lon_raw >= west)  & (lon_raw <= east)  &
+                        (ch4_raw > 1200)   & (ch4_raw < 2200)   # ppb physical range
+                    )
+                    all_lats.extend(lat_raw[mask].tolist())
+                    all_lons.extend(lon_raw[mask].tolist())
+                    all_ch4.extend(ch4_raw[mask].tolist())
+                    _p(f"GOSAT XCH₄: {int(mask.sum())} good retrieval(s) in AOI from {fname}.")
+
+                except Exception as e:
+                    _p(f"❌  GOSAT XCH₄: error reading {fname}: {e}")
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+    finally:
+        sftp.close()
+        transport.close()
+
+    if not all_lats:
+        log.warning("GOSAT XCH4: no retrievals found for AOI / date range.")
+        return None
+
+    return _grid_oco_to_tif(
+        np.array(all_lats, dtype=np.float64),
+        np.array(all_lons, dtype=np.float64),
+        np.array(all_ch4,  dtype=np.float64),
+        bbox, grid_res,
+        out_dir / "gosat_ch4_composite.tif",
+    )
 
 
 def _grid_oco_to_tif(lats, lons, values, bbox: list,
@@ -982,10 +1155,11 @@ def _write_summary(cfg: PipelineConfig, results: dict, path: Path):
         f"GEE project: {cfg.gee_project}",
         "",
         "Satellites used",
-        f"  TROPOMI CH4 : {'✓' if cfg.use_tropomi else '—'}",
-        f"  OCO-2 XCO2  : {'✓' if cfg.use_oco2 else '—'}",
-        f"  OCO-3 XCO2  : {'✓' if cfg.use_oco3 else '—'}",
-        f"  GOSAT       : {'✓' if cfg.use_gosat else '—'}",
+        f"  TROPOMI CH4       : {'✓' if cfg.use_tropomi else '—'}",
+        f"  OCO-2 XCO2        : {'✓' if cfg.use_oco2 else '—'}",
+        f"  OCO-3 XCO2        : {'✓' if cfg.use_oco3 else '—'}",
+        f"  GOSAT XCO2 (ACOS) : {'✓' if cfg.use_gosat else '—'}",
+        f"  GOSAT XCH4 (NIES) : {'✓' if (cfg.use_gosat and cfg.nies_user) else '—'}",
         "",
         "Output files",
     ]
