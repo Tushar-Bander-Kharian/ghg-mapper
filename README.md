@@ -125,6 +125,14 @@ Reporting, Verification) workflows under Verra VCS and India's domestic carbon m
 
 ## Changelog
 
+### v1.1.1 (April 2026)
+- **Fix OCO-2/3 401 Unauthorized**: NASA GES DISC migrated from `gesdisc.eosdis.nasa.gov`
+  to `data.gesdisc.earthdata.nasa.gov`. Updated OPeNDAP URL rewriting to map
+  `data.gesdisc.earthdata.nasa.gov/data/` → `opendap.gesdisc.earthdata.nasa.gov/opendap/`
+  so granule URLs resolve correctly instead of hitting the raw data endpoint.
+- Added `check_url` to `pydap.cas.urs.setup_session` to complete the EarthData URS
+  handshake before the first granule request, preventing OAuth 401 errors.
+
 ### v1.1.0 (April 2026)
 - Ported to QGIS 4.0 / Qt6: all PyQt5 imports replaced with `qgis.PyQt`
 - Fixed `QHeaderView.Stretch` → `QHeaderView.ResizeMode.Stretch` (Qt6 enum)
