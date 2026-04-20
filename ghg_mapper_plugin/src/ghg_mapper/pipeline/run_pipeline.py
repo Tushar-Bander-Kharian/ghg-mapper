@@ -39,10 +39,9 @@ GEE_S5P_NO2      = "COPERNICUS/S5P/OFFL/L3_NO2"   # CAAQMS co-tracer validation
 
 # NASA GES DISC — OCO-2/3 L2 Lite FP (NOT in GEE; streamed via PyDAP / OPeNDAP)
 # Approach mirrors: https://github.com/sagarlimbu0/NASA-OCO2-OCO3
-NASA_CMR_SEARCH    = "https://cmr.earthdata.nasa.gov/search/granules.json"
-NASA_OPENDAP_ROOT  = "https://opendap.gesdisc.earthdata.nasa.gov/opendap/"
-NASA_OPENDAP_ROOT_LEGACY = "https://oco2.gesdisc.eosdis.nasa.gov/opendap/"
-NASA_URS_HOST      = "urs.earthdata.nasa.gov"
+NASA_CMR_SEARCH   = "https://cmr.earthdata.nasa.gov/search/granules.json"
+NASA_OPENDAP_ROOT = "https://oco2.gesdisc.eosdis.nasa.gov/opendap/"
+NASA_URS_HOST     = "urs.earthdata.nasa.gov"
 OCO2_SHORT_NAME   = "OCO2_L2_Lite_FP"
 OCO2_VERSION      = "11.2r"
 OCO3_SHORT_NAME   = "OCO3_L2_Lite_FP"
@@ -270,9 +269,12 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
     Stream OCO-2 and/or OCO-3 XCO₂ L2 Lite FP data from NASA GES DISC via
     PyDAP / OPeNDAP and write a gridded mean XCO₂ GeoTIFF.
 
-    Approach mirrors https://github.com/sagarlimbu0/NASA-OCO2-OCO3 :
+    Mirrors the workflow from https://github.com/sagarlimbu0/NASA-OCO2-OCO3 :
+      - Credentials      : written to ~/.netrc for urs.earthdata.nasa.gov
       - Granule discovery : NASA CMR search API (no auth required)
       - Data streaming    : pydap.cas.urs.setup_session + open_url (OPeNDAP)
+        check_url is set to the first real granule URL so the URS handshake
+        authenticates against an actual file, not a directory listing.
       - Variables read    : xco2, latitude, longitude, xco2_quality_flag
       - Quality filter    : xco2_quality_flag == 0  (good retrievals only)
 
@@ -292,20 +294,11 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
 
     import numpy as np
 
+    # Write credentials to ~/.netrc so pydap/requests can use them for the
+    # URS Basic-Auth challenge that backs setup_session (mirrors reference repo).
+    _ensure_earthdata_netrc(earthdata_user, earthdata_pass)
+
     _p(f"OCO: authenticating with NASA EarthData as '{earthdata_user}' …")
-    try:
-        # check_url triggers the URS login handshake up-front so subsequent
-        # granule requests carry valid session cookies.  We pass a known
-        # catalogue-index page (not a dataset file) so pydap never tries to
-        # append .dds to it.
-        session = setup_session(
-            earthdata_user, earthdata_pass,
-            check_url="https://opendap.gesdisc.earthdata.nasa.gov/opendap/",
-        )
-        _p("OCO: NASA EarthData session established.")
-    except Exception as e:
-        _p(f"❌  NASA EarthData authentication failed: {e}")
-        return None
 
     west, south, east, north = bbox
     all_lats:  list = []
@@ -318,6 +311,8 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
     if use_oco3:
         datasets.append((OCO3_SHORT_NAME, OCO3_VERSION, "OCO-3"))
 
+    session = None  # lazily created once we have a real granule URL
+
     for short_name, version, label in datasets:
         opendap_urls = _cmr_opendap_urls(short_name, version,
                                          start, end, bbox, max_granules=20)
@@ -326,6 +321,20 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
             _p(f"⚠  {label}: no granules with valid OPeNDAP file URLs in CMR for "
                f"this AOI / date range.  Check short_name='{short_name}' "
                f"version='{version}' and date window.")
+            continue
+
+        # Build the session once using the first real granule URL as check_url.
+        # Mirrors reference repo: setup_session(user, pass, check_url=url+filename)
+        if session is None:
+            try:
+                session = setup_session(
+                    earthdata_user, earthdata_pass,
+                    check_url=opendap_urls[0],
+                )
+                _p("OCO: NASA EarthData session established.")
+            except Exception as e:
+                _p(f"❌  NASA EarthData authentication failed: {e}")
+                return None
 
         for url in opendap_urls:
             try:
@@ -365,6 +374,48 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
         bbox, grid_res,
         out_dir / "xco2_composite.tif",
     )
+
+
+def _ensure_earthdata_netrc(username: str, password: str) -> None:
+    """
+    Write (or update) the ~/.netrc entry for urs.earthdata.nasa.gov.
+    Mirrors the reference repo approach: credentials are stored in .netrc so
+    that pydap/requests can satisfy the URS Basic-Auth challenge automatically.
+    """
+    import netrc as _netrc_mod
+    import stat
+
+    netrc_path = Path.home() / ".netrc"
+    host = NASA_URS_HOST
+
+    # Read existing entries, if any.
+    try:
+        existing = _netrc_mod.netrc(str(netrc_path))
+        hosts = dict(existing.hosts)
+    except Exception:
+        hosts = {}
+
+    # Only write if missing or credentials changed.
+    current = hosts.get(host)
+    if current and current[0] == username and current[2] == password:
+        return
+
+    hosts[host] = (username, None, password)
+
+    lines = []
+    for h, (login, account, passwd) in hosts.items():
+        lines.append(f"machine {h}")
+        lines.append(f"  login {login}")
+        if account:
+            lines.append(f"  account {account}")
+        lines.append(f"  password {passwd}")
+        lines.append("")
+
+    netrc_path.write_text("\n".join(lines))
+    try:
+        netrc_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600 — required by netrc
+    except Exception:
+        pass
 
 
 def _cmr_opendap_urls(short_name: str, version: str,
@@ -432,18 +483,19 @@ def _cmr_opendap_urls(short_name: str, version: str,
                 data_url = href
 
         if opendap_url is None and data_url:
-            # Rewrite /data/ → /opendap/ to get the OPeNDAP endpoint.
-            # Handle both the new domain (data.gesdisc.earthdata.nasa.gov)
-            # and the legacy domain (gesdisc.eosdis.nasa.gov).
+            # CMR data URLs now use data.gesdisc.earthdata.nasa.gov/data/.
+            # Map back to the known-working OPeNDAP server (oco2.gesdisc.eosdis.nasa.gov)
+            # which mirrors the reference repo's endpoint.
+            # Path structure is identical; only the host+prefix changes.
             if "data.gesdisc.earthdata.nasa.gov/data/" in data_url:
                 opendap_url = data_url.replace(
                     "data.gesdisc.earthdata.nasa.gov/data/",
-                    "opendap.gesdisc.earthdata.nasa.gov/opendap/",
+                    "oco2.gesdisc.eosdis.nasa.gov/opendap/",
                 )
-            else:
+            elif "gesdisc.eosdis.nasa.gov/data/" in data_url:
                 opendap_url = data_url.replace(
                     "gesdisc.eosdis.nasa.gov/data/",
-                    "gesdisc.eosdis.nasa.gov/opendap/",
+                    "oco2.gesdisc.eosdis.nasa.gov/opendap/",
                 )
 
         # Final guard: only accept URLs that point to an actual granule file.
