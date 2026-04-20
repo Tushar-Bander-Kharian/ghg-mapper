@@ -266,44 +266,39 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
                         use_oco2: bool = True, use_oco3: bool = True,
                         prog: Optional[ProgressFn] = None) -> Optional[Path]:
     """
-    Stream OCO-2 and/or OCO-3 XCO₂ L2 Lite FP data from NASA GES DISC via
-    PyDAP / OPeNDAP and write a gridded mean XCO₂ GeoTIFF.
+    Download OCO-2 and/or OCO-3 XCO₂ L2 Lite FP granules from NASA GES DISC
+    via direct HTTPS and write a gridded mean XCO₂ GeoTIFF.
 
-    Mirrors the workflow from https://github.com/sagarlimbu0/NASA-OCO2-OCO3 :
+    OPeNDAP streaming via pydap was abandoned because the session cookies
+    obtained from setup_session do not persist into the .dods data-fetch
+    requests, causing every granule to return an OAuth redirect HTML page that
+    pydap fails to parse ("not enough values to unpack").
+
+    New approach (mirrors reference repo credential handling):
       - Credentials      : written to ~/.netrc for urs.earthdata.nasa.gov
-      - Granule discovery : NASA CMR search API (no auth required)
-      - Data streaming    : pydap.cas.urs.setup_session + open_url (OPeNDAP)
-        check_url is set to the first real granule URL so the URS handshake
-        authenticates against an actual file, not a directory listing.
-      - Variables read    : xco2, latitude, longitude, xco2_quality_flag
-      - Quality filter    : xco2_quality_flag == 0  (good retrievals only)
+      - Auth session     : pydap.cas.urs.setup_session with check_url set to
+                           the first direct data URL so URS cookies are scoped
+                           to data.gesdisc.earthdata.nasa.gov
+      - Granule download : session.get(direct_data_url) → temp .nc4 file
+      - Variables read   : h5py (primary) → netCDF4 (fallback)
+      - Quality filter   : xco2_quality_flag == 0
 
     Requires (OSGeo4W Shell):
-      pip install pydap requests
-
-    numpy and osgeo.gdal are bundled with QGIS.
+      pip install pydap requests h5py
     """
     def _p(msg): prog(25, msg) if prog else log.info(msg)
 
     try:
-        from pydap.cas.urs import setup_session
-        from pydap.client import open_url
+        import requests as _requests
     except ImportError:
-        _p("❌  'pydap' not installed.  Run in OSGeo4W Shell:  pip install pydap")
+        _p("❌  'requests' not installed.  Run:  pip install requests")
         return None
 
     import numpy as np
+    import tempfile
+    import os
 
-    # Write credentials to ~/.netrc so pydap/requests can use them for the
-    # URS Basic-Auth challenge that backs setup_session (mirrors reference repo).
     _ensure_earthdata_netrc(earthdata_user, earthdata_pass)
-
-    _p(f"OCO: authenticating with NASA EarthData as '{earthdata_user}' …")
-
-    west, south, east, north = bbox
-    all_lats:  list = []
-    all_lons:  list = []
-    all_xco2:  list = []
 
     datasets = []
     if use_oco2:
@@ -311,57 +306,76 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
     if use_oco3:
         datasets.append((OCO3_SHORT_NAME, OCO3_VERSION, "OCO-3"))
 
-    session = None  # lazily created once we have a real granule URL
-
+    # Collect direct data URLs from CMR (no OPeNDAP rewriting).
+    labelled_urls: list = []
     for short_name, version, label in datasets:
-        opendap_urls = _cmr_opendap_urls(short_name, version,
-                                         start, end, bbox, max_granules=20)
-        _p(f"OCO: {label} — {len(opendap_urls)} valid granule URL(s) found via CMR.")
-        if not opendap_urls:
-            _p(f"⚠  {label}: no granules with valid OPeNDAP file URLs in CMR for "
-               f"this AOI / date range.  Check short_name='{short_name}' "
-               f"version='{version}' and date window.")
-            continue
+        urls = _cmr_direct_data_urls(short_name, version, start, end, bbox,
+                                     max_granules=8)
+        _p(f"OCO: {label} — {len(urls)} granule(s) found via CMR.")
+        if not urls:
+            _p(f"⚠  {label}: no granules found in CMR for this AOI / date range. "
+               f"(short_name={short_name!r} version={version!r})")
+        for u in urls:
+            labelled_urls.append((label, u))
 
-        # Build the session once using the first real granule URL as check_url.
-        # Mirrors reference repo: setup_session(user, pass, check_url=url+filename)
-        if session is None:
-            try:
-                session = setup_session(
-                    earthdata_user, earthdata_pass,
-                    check_url=opendap_urls[0],
-                )
-                _p("OCO: NASA EarthData session established.")
-            except Exception as e:
-                _p(f"❌  NASA EarthData authentication failed: {e}")
-                return None
+    if not labelled_urls:
+        _p("⚠  OCO: no granules found for any dataset. Check credentials and date range.")
+        return None
 
-        for url in opendap_urls:
-            try:
-                _p(f"OCO: streaming {url.rsplit('/', 1)[-1]}  ({url})")
-                ds = open_url(url, session=session)
+    # Build one authenticated session scoped to data.gesdisc.earthdata.nasa.gov.
+    _p(f"OCO: authenticating with NASA EarthData as '{earthdata_user}' …")
+    try:
+        from pydap.cas.urs import setup_session
+        session = setup_session(
+            earthdata_user, earthdata_pass,
+            check_url=labelled_urls[0][1],   # real data URL → cookies scoped correctly
+        )
+        _p("OCO: NASA EarthData session established.")
+    except Exception as e:
+        _p(f"⚠  OCO: pydap setup_session failed ({e}), falling back to basic-auth session.")
+        session = _requests.Session()
+        session.auth = (earthdata_user, earthdata_pass)
 
-                # Variable names follow the reference repo (lowercase netCDF4)
-                xco2 = np.array(ds["xco2"][:]).flatten()
-                lat  = np.array(ds["latitude"][:]).flatten()
-                lon  = np.array(ds["longitude"][:]).flatten()
-                qf   = np.array(ds["xco2_quality_flag"][:]).flatten()
+    west, south, east, north = bbox
+    all_lats: list = []
+    all_lons: list = []
+    all_xco2: list = []
 
-                # Quality + AOI + physical-range filter (ref repo: flag == 0)
-                mask = (
-                    (qf == 0) &
-                    (lat >= south) & (lat <= north) &
-                    (lon >= west)  & (lon <= east)  &
-                    (xco2 > 100)   & (xco2 < 600)
-                )
-                n_good = int(mask.sum())
-                all_lats.extend(lat[mask].tolist())
-                all_lons.extend(lon[mask].tolist())
-                all_xco2.extend(xco2[mask].tolist())
-                _p(f"OCO: {label} — {n_good} good retrievals in AOI from this granule.")
+    for label, url in labelled_urls:
+        tmp_path = None
+        try:
+            fname = url.rsplit("/", 1)[-1]
+            _p(f"OCO: downloading {fname} …")
+            r = session.get(url, stream=True, timeout=300)
+            r.raise_for_status()
 
-            except Exception as e:
-                _p(f"❌  OCO: failed to stream {url.rsplit('/', 1)[-1]}: {e}")
+            with tempfile.NamedTemporaryFile(suffix=".nc4", delete=False) as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                    f.write(chunk)
+                tmp_path = f.name
+
+            xco2_arr, lat_arr, lon_arr, qf_arr = _read_nc4_oco_vars(tmp_path)
+
+            mask = (
+                (qf_arr == 0) &
+                (lat_arr >= south) & (lat_arr <= north) &
+                (lon_arr >= west)  & (lon_arr <= east)  &
+                (xco2_arr > 100)   & (xco2_arr < 600)
+            )
+            n_good = int(mask.sum())
+            all_lats.extend(lat_arr[mask].tolist())
+            all_lons.extend(lon_arr[mask].tolist())
+            all_xco2.extend(xco2_arr[mask].tolist())
+            _p(f"OCO: {label} — {n_good} good retrieval(s) in AOI from {fname}.")
+
+        except Exception as e:
+            _p(f"❌  OCO: failed for {url.rsplit('/', 1)[-1]}: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     if not all_lats:
         log.warning("No OCO-2/3 retrievals found for the specified AOI and date range.")
@@ -373,6 +387,84 @@ def _stage_xco2_direct(start: str, end: str, bbox: list, out_dir: Path,
         np.array(all_xco2,  dtype=np.float64),
         bbox, grid_res,
         out_dir / "xco2_composite.tif",
+    )
+
+
+def _cmr_direct_data_urls(short_name: str, version: str,
+                           start: str, end: str, bbox: list,
+                           max_granules: int = 8) -> list:
+    """
+    Query NASA CMR and return direct HTTPS download URLs
+    (data.gesdisc.earthdata.nasa.gov/data/...) for each granule.
+    No OPeNDAP rewriting — used for direct download mode.
+    """
+    try:
+        import requests
+    except ImportError:
+        log.error("'requests' not installed.")
+        return []
+
+    west, south, east, north = bbox
+    params = {
+        "short_name":   short_name,
+        "version":      version,
+        "temporal[]":   f"{start}T00:00:00Z,{end}T23:59:59Z",
+        "bounding_box": f"{west},{south},{east},{north}",
+        "page_size":    max_granules,
+        "sort_key":     "start_date",
+    }
+    try:
+        resp = requests.get(NASA_CMR_SEARCH, params=params, timeout=30)
+        resp.raise_for_status()
+        entries = resp.json().get("feed", {}).get("entry", [])
+    except Exception as e:
+        log.warning("CMR search failed for %s v%s: %s", short_name, version, e)
+        return []
+
+    urls = []
+    for entry in entries:
+        for link in entry.get("links", []):
+            href = link.get("href", "")
+            rel  = link.get("rel", "")
+            if "data#" in rel and href.endswith((".nc4", ".nc")):
+                urls.append(href)
+                break
+    return urls
+
+
+def _read_nc4_oco_vars(path: str):
+    """
+    Read xco2, latitude, longitude, xco2_quality_flag from an OCO NC4 file.
+    Tries h5py first (always available in QGIS/OSGeo4W), then netCDF4.
+    Returns four flat numpy float64/int arrays.
+    """
+    import numpy as np
+
+    try:
+        import h5py
+        with h5py.File(path, "r") as f:
+            xco2 = np.array(f["xco2"]).flatten().astype(np.float64)
+            lat  = np.array(f["latitude"]).flatten().astype(np.float64)
+            lon  = np.array(f["longitude"]).flatten().astype(np.float64)
+            qf   = np.array(f["xco2_quality_flag"]).flatten().astype(np.int32)
+        return xco2, lat, lon, qf
+    except ImportError:
+        pass
+
+    try:
+        import netCDF4 as nc
+        with nc.Dataset(path) as ds:
+            xco2 = np.ma.filled(ds["xco2"][:], np.nan).flatten().astype(np.float64)
+            lat  = np.ma.filled(ds["latitude"][:], np.nan).flatten().astype(np.float64)
+            lon  = np.ma.filled(ds["longitude"][:], np.nan).flatten().astype(np.float64)
+            qf   = np.ma.filled(ds["xco2_quality_flag"][:], 1).flatten().astype(np.int32)
+        return xco2, lat, lon, qf
+    except ImportError:
+        pass
+
+    raise RuntimeError(
+        "Cannot read NC4 file: neither h5py nor netCDF4 is available. "
+        "Run in OSGeo4W Shell:  pip install h5py"
     )
 
 
