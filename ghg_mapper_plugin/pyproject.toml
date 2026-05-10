@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ghg-mapper"
-version = "0.1.0"
+version = "0.3.0"
 description = "Multi-satellite GHG hotspot mapping with SOC/SIC ground-truth integration for agricultural India"
 authors = [{ name = "Tushar Bander", email = "tushar.bander@amity.edu" }]
 readme = "README.md"
@@ -41,7 +41,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "black", "ruff"]
+dev = ["pytest", "pytest-cov", "black", "ruff", "hypothesis"]
 
 [project.urls]
 Repository = "https://github.com/tusharbander/ghg-mapper"

@@ -87,6 +87,43 @@ class PipelineWorker(QThread):
                 soc_records      = self.config.get("soil_records", []),
                 caaqms_csv       = self.config.get("caaqms_dir", None),
                 wb_correction    = True,
+                cmr_spatial_buffer = self.config.get("cmr_spatial_buffer", 2.0),
+                oco2_version     = self.config.get("oco2_version"),
+                oco3_version     = self.config.get("oco3_version"),
+                gosat_version    = self.config.get("gosat_version"),
+                # ── Methodology tab (Task 9.4) ───────────────────────
+                enhancement_mode         = self.config.get("enhancement_mode", False),
+                background_window_deg    = self.config.get("background_window_deg", 1.5),
+                background_percentile    = self.config.get("background_percentile", 10),
+                ch4_threshold_ppb        = self.config.get("ch4_threshold_ppb", 10.0),
+                xco2_threshold_ppm       = self.config.get("xco2_threshold_ppm", 1.5),
+                cropland_mask            = self.config.get("cropland_mask", False),
+                include_grassland        = self.config.get("include_grassland", False),
+                compositing_mode         = self.config.get("compositing_mode", "whole_period"),
+                custom_windows           = self.config.get("custom_windows", []),
+                estimate_flux            = self.config.get("estimate_flux", False),
+                use_era5                 = self.config.get("use_era5", False),
+                use_firms                = self.config.get("use_firms", False),
+                firms_sensors            = self.config.get("firms_sensors", "both"),
+                use_livestock            = self.config.get("use_livestock", False),
+                glw4_cattle_path         = self.config.get("glw4_cattle_path"),
+                glw4_buffalo_path        = self.config.get("glw4_buffalo_path"),
+                glw4_goat_path           = self.config.get("glw4_goat_path"),
+                glw4_sheep_path          = self.config.get("glw4_sheep_path"),
+                use_no2_cotracer         = self.config.get("use_no2_cotracer", False),
+                no2_high_percentile      = self.config.get("no2_high_percentile", 80),
+                no2_low_percentile       = self.config.get("no2_low_percentile", 40),
+                strict_tropomi_qa        = self.config.get("strict_tropomi_qa", False),
+                tropomi_qa_threshold     = self.config.get("tropomi_qa_threshold", 0.5),
+                tropomi_albedo_threshold = self.config.get("tropomi_albedo_threshold", 0.05),
+                tropomi_cloud_threshold  = self.config.get("tropomi_cloud_threshold", 0.3),
+                inverse_variance_weighting = self.config.get("inverse_variance_weighting", True),
+                min_retrievals_per_cell  = self.config.get("min_retrievals_per_cell", 5),
+                caaqms_bias_correction   = self.config.get("caaqms_bias_correction", False),
+                idw_power                = self.config.get("idw_power", 2.0),
+                compute_priority         = self.config.get("compute_priority", False),
+                multiscale_fine_grid     = self.config.get("multiscale_fine_grid", False),
+                fine_grid_res            = self.config.get("fine_grid_res", 0.02),
             )
             def _progress(pct, msg):
                 self.progress_signal.emit(pct)
@@ -112,7 +149,7 @@ class GHGMapperDialog(QDialog):
         super().__init__(parent)
         self.iface = iface
         self.worker = None
-        self.setWindowTitle("GHG Mapper — Agricultural India  v0.1")
+        self.setWindowTitle("GHG Mapper v0.2")
         self.setMinimumSize(820, 680)
         self._build_ui()
         self._load_settings()      # restore saved credentials & paths
@@ -136,10 +173,11 @@ class GHGMapperDialog(QDialog):
         # Tabs
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab_setup(),        "① Setup")
-        self.tabs.addTab(self._tab_ground_truth(), "② Ground Truth (SOC / SIC)")
-        self.tabs.addTab(self._tab_caaqms(),       "③ CAAQMS Validation")
-        self.tabs.addTab(self._tab_run(),          "④ Run Pipeline")
-        self.tabs.addTab(self._tab_results(),      "⑤ Results")
+        self.tabs.addTab(self._tab_methodology(),  "② Methodology")
+        self.tabs.addTab(self._tab_ground_truth(), "③ Ground Truth (SOC / SIC)")
+        self.tabs.addTab(self._tab_caaqms(),       "④ CAAQMS Validation")
+        self.tabs.addTab(self._tab_run(),          "⑤ Run Pipeline")
+        self.tabs.addTab(self._tab_results(),      "⑥ Results")
         root.addWidget(self.tabs)
 
         # Bottom buttons
@@ -149,6 +187,17 @@ class GHGMapperDialog(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(btn_close)
         root.addLayout(btn_row)
+
+        # Cross-feature dependencies (Task 9.5) — wire AFTER all tabs built
+        # so every required widget exists. The ``_update_*_availability``
+        # slots are idempotent and guard with ``hasattr`` for safety.
+        self.chk_enhancement_mode.stateChanged.connect(self._update_flux_availability)
+        self.chk_use_era5.stateChanged.connect(self._update_flux_availability)
+        self.caaqms_path.textChanged.connect(self._update_caaqms_bias_availability)
+
+        # Initialize availability states.
+        self._update_flux_availability()
+        self._update_caaqms_bias_availability()
 
     # ---- Tab 1: Setup ------------------------------------------------
 
@@ -234,6 +283,56 @@ class GHGMapperDialog(QDialog):
         )
         nasa_link.setOpenExternalLinks(True)
         nasa_form.addRow("", nasa_link)
+
+        # CMR spatial buffer (expands AOI bbox for granule search to cope with narrow OCO swath geometry)
+        self.cmr_buffer_spin = QDoubleSpinBox()
+        self.cmr_buffer_spin.setRange(0.0, 10.0)
+        self.cmr_buffer_spin.setSingleStep(0.5)
+        self.cmr_buffer_spin.setDecimals(2)
+        self.cmr_buffer_spin.setValue(2.0)
+        self.cmr_buffer_spin.setToolTip(
+            "Degrees to expand the AOI bounding box when searching CMR for OCO-2 / OCO-3 / GOSAT granules.\n"
+            "OCO swaths are very narrow (~10 km) and highly oblique, so a tight AOI may miss granules\n"
+            "that still contain sample points inside your AOI. The downloaded samples are re-filtered\n"
+            "against the original (unbuffered) AOI, so this only affects granule discovery — not the\n"
+            "final extent of the output. Default: 2.0°."
+        )
+        nasa_form.addRow("CMR spatial buffer (°):", self.cmr_buffer_spin)
+
+        # Dataset version strings for CMR queries (clear to omit version filter)
+        _version_tooltip = (
+            "Dataset version used when querying NASA CMR. Clear this field to omit the\n"
+            "version filter entirely (useful if the listed version has been withdrawn or\n"
+            "you want the latest available)."
+        )
+        self.oco2_version_edit = QLineEdit("11.2r")
+        self.oco2_version_edit.setToolTip(_version_tooltip)
+        nasa_form.addRow("OCO-2 version:", self.oco2_version_edit)
+
+        self.oco3_version_edit = QLineEdit("10.4r")
+        self.oco3_version_edit.setToolTip(_version_tooltip)
+        nasa_form.addRow("OCO-3 version:", self.oco3_version_edit)
+
+        self.gosat_version_edit = QLineEdit("9r")
+        self.gosat_version_edit.setToolTip(_version_tooltip)
+        nasa_form.addRow("GOSAT ACOS version:", self.gosat_version_edit)
+
+        # Refresh button — queries NASA CMR for current dataset versions (Req 16, Task 10.2)
+        btn_refresh_row = QHBoxLayout()
+        self.btn_refresh_cmr = QPushButton("↻ Refresh versions from CMR")
+        self.btn_refresh_cmr.setToolTip(
+            "Query NASA CMR for the latest OCO-2 / OCO-3 / GOSAT dataset versions\n"
+            "and update the fields above. Never modifies fields if the network is\n"
+            "unreachable. Default: not executed until clicked."
+        )
+        self.btn_refresh_cmr.clicked.connect(self._on_refresh_cmr_versions)
+        self.cmr_refresh_status = QLabel("")
+        self.cmr_refresh_status.setWordWrap(True)
+        btn_refresh_row.addWidget(self.btn_refresh_cmr)
+        btn_refresh_row.addWidget(self.cmr_refresh_status)
+        btn_refresh_row.addStretch()
+        nasa_form.addRow("", btn_refresh_row)
+
         layout.addWidget(nasa_box)
         self.earthdata_user_edit.textChanged.connect(self._update_sat_availability)
         self.earthdata_pass_edit.textChanged.connect(self._update_sat_availability)
@@ -394,6 +493,623 @@ class GHGMapperDialog(QDialog):
         layout.addStretch()
         return w
 
+    # ---- Tab 2: Methodology ------------------------------------------
+
+    def _tab_methodology(self):
+        """Methodology tab — opt-in advanced hotspot classification options (Req 18, Task 9.1)."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        info = QLabel(
+            "<b>Advanced methodology options — all opt-in.</b><br>"
+            "When every checkbox below is unchecked, the pipeline behaves "
+            "identically to the default concentration-percentile version "
+            "(backward compatible)."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("padding: 6px; background: #eaf4fb; border-radius: 4px;")
+        layout.addWidget(info)
+
+        # ── 1. Hotspot classification ─────────────────────────────────
+        hc_box = QGroupBox("Hotspot classification")
+        hc_form = QFormLayout(hc_box)
+
+        self.chk_enhancement_mode = QCheckBox(
+            "Use enhancement above background for hotspot classification"
+        )
+        self.chk_enhancement_mode.setChecked(False)
+        self.chk_enhancement_mode.setToolTip(
+            "Classify hotspots as cells whose concentration exceeds a LOCAL\n"
+            "background (10th-percentile in a ~1.5° window), instead of the\n"
+            "AOI-wide 90th percentile. Default: off. Source: SRON TROPOMI\n"
+            "enhancement methodology (Lorente et al. 2021)."
+        )
+        hc_form.addRow(self.chk_enhancement_mode)
+
+        self.background_window_spin = QDoubleSpinBox()
+        self.background_window_spin.setRange(0.5, 5.0)
+        self.background_window_spin.setSingleStep(0.5)
+        self.background_window_spin.setDecimals(1)
+        self.background_window_spin.setValue(1.5)
+        self.background_window_spin.setSuffix(" °")
+        self.background_window_spin.setToolTip(
+            "Width (degrees) of the spatial window used to compute the local\n"
+            "background percentile around each cell. Default: 1.5°. Larger\n"
+            "windows smooth over regional gradients; smaller windows isolate\n"
+            "finer hotspots but risk cancelling out the signal."
+        )
+        hc_form.addRow("Background window:", self.background_window_spin)
+
+        self.background_pct_spin = QSpinBox()
+        self.background_pct_spin.setRange(1, 25)
+        self.background_pct_spin.setValue(10)
+        self.background_pct_spin.setToolTip(
+            "Percentile (within the background window) treated as the local\n"
+            "background concentration. Default: 10. Lower values produce\n"
+            "more conservative background estimates (larger enhancements)."
+        )
+        hc_form.addRow("Background percentile:", self.background_pct_spin)
+
+        self.ch4_threshold_spin = QDoubleSpinBox()
+        self.ch4_threshold_spin.setRange(1.0, 100.0)
+        self.ch4_threshold_spin.setSingleStep(1.0)
+        self.ch4_threshold_spin.setDecimals(1)
+        self.ch4_threshold_spin.setValue(10.0)
+        self.ch4_threshold_spin.setSuffix(" ppb")
+        self.ch4_threshold_spin.setToolTip(
+            "CH₄ enhancement threshold (ppb) for flagging a cell as a hotspot\n"
+            "in enhancement mode. Default: 10 ppb. Typical IGP plume range is\n"
+            "5–30 ppb. Applies only when enhancement mode is on."
+        )
+        hc_form.addRow("CH₄ enhancement threshold:", self.ch4_threshold_spin)
+
+        self.xco2_threshold_spin = QDoubleSpinBox()
+        self.xco2_threshold_spin.setRange(0.1, 10.0)
+        self.xco2_threshold_spin.setSingleStep(0.1)
+        self.xco2_threshold_spin.setDecimals(2)
+        self.xco2_threshold_spin.setValue(1.5)
+        self.xco2_threshold_spin.setSuffix(" ppm")
+        self.xco2_threshold_spin.setToolTip(
+            "XCO₂ enhancement threshold (ppm) for flagging a cell as a hotspot\n"
+            "in enhancement mode. Default: 1.5 ppm. Applies only when\n"
+            "enhancement mode is on."
+        )
+        hc_form.addRow("XCO₂ enhancement threshold:", self.xco2_threshold_spin)
+
+        self.chk_estimate_flux = QCheckBox(
+            "Estimate mass-balance flux from ERA5 wind (requires enhancement + ERA5)"
+        )
+        self.chk_estimate_flux.setToolTip(
+            "Compute a first-order emission rate per cell as\n"
+            "  flux = wind × enhancement × M / grid_length\n"
+            "in kg/ha/day. Requires BOTH enhancement mode AND ERA5 to be\n"
+            "enabled. Default: off. Source: mass-balance method, see\n"
+            "Jacob et al. 2016."
+        )
+        hc_form.addRow(self.chk_estimate_flux)
+
+        layout.addWidget(hc_box)
+
+        # ── 2. Spatial masking ────────────────────────────────────────
+        sm_box = QGroupBox("Spatial masking")
+        sm_form = QFormLayout(sm_box)
+
+        self.chk_cropland_mask = QCheckBox(
+            "Restrict hotspot detection to cropland (ESA WorldCover)"
+        )
+        self.chk_cropland_mask.setToolTip(
+            "Mask out non-cropland cells using ESA WorldCover 2021 class 40.\n"
+            "Keeps urban/industrial/water cells from contaminating agricultural\n"
+            "emission analysis. Default: off. Source: ESA WorldCover v200."
+        )
+        sm_form.addRow(self.chk_cropland_mask)
+
+        self.chk_include_grassland = QCheckBox("    Include grassland (class 30)")
+        self.chk_include_grassland.setToolTip(
+            "Additionally include WorldCover class 30 (grassland) in the\n"
+            "allowed-area mask. Useful for livestock regions. Default: off."
+        )
+        sm_form.addRow(self.chk_include_grassland)
+
+        layout.addWidget(sm_box)
+
+        # ── 3. Temporal compositing ───────────────────────────────────
+        tc_box = QGroupBox("Temporal compositing")
+        tc_layout = QVBoxLayout(tc_box)
+
+        tc_mode_row = QHBoxLayout()
+        tc_mode_row.addWidget(QLabel("Mode:"))
+        self.compositing_mode_combo = QComboBox()
+        self.compositing_mode_combo.addItems([
+            "Whole period",
+            "Monthly",
+            "Kharif / Rabi / Zaid (Indian seasons)",
+            "Custom windows",
+        ])
+        self.compositing_mode_combo.setToolTip(
+            "How the date range is partitioned into composite windows.\n"
+            " • Whole period — one composite across the full range (default)\n"
+            " • Monthly      — one per calendar month\n"
+            " • Kharif/Rabi/Zaid — Indian agricultural seasons\n"
+            "     (Jun–Oct, Nov–Mar, Apr–May)\n"
+            " • Custom       — user-defined named windows\n"
+            "Source: ICAR agricultural calendar."
+        )
+        self.compositing_mode_combo.currentIndexChanged.connect(
+            self._on_compositing_mode_changed
+        )
+        tc_mode_row.addWidget(self.compositing_mode_combo)
+        tc_mode_row.addStretch()
+        tc_layout.addLayout(tc_mode_row)
+
+        self.custom_windows_helper_lbl = QLabel(
+            "<i>Add one or more named date windows (YYYY-MM-DD).</i>"
+        )
+        self.custom_windows_helper_lbl.setVisible(False)
+        tc_layout.addWidget(self.custom_windows_helper_lbl)
+
+        self.custom_windows_table = QTableWidget(0, 3)
+        self.custom_windows_table.setHorizontalHeaderLabels([
+            "Name", "Start (YYYY-MM-DD)", "End (YYYY-MM-DD)",
+        ])
+        self.custom_windows_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.custom_windows_table.setMinimumHeight(120)
+        self.custom_windows_table.setVisible(False)
+        self.custom_windows_table.setToolTip(
+            "Each row defines one composite window. Name is any string used\n"
+            "in the output subfolder (e.g. 'kharif_2023'). Start and End must\n"
+            "be YYYY-MM-DD and End ≥ Start."
+        )
+        tc_layout.addWidget(self.custom_windows_table)
+
+        cw_btn_row = QHBoxLayout()
+        self.btn_add_window = QPushButton("+ Add window")
+        self.btn_add_window.setToolTip(
+            "Insert a blank window row. The start/end dates default to today."
+        )
+        self.btn_add_window.clicked.connect(self._on_add_custom_window)
+        self.btn_remove_window = QPushButton("× Remove selected")
+        self.btn_remove_window.setToolTip(
+            "Remove the currently-selected row from the custom windows table."
+        )
+        self.btn_remove_window.clicked.connect(self._on_remove_custom_window)
+        self.btn_add_window.setVisible(False)
+        self.btn_remove_window.setVisible(False)
+        cw_btn_row.addWidget(self.btn_add_window)
+        cw_btn_row.addWidget(self.btn_remove_window)
+        cw_btn_row.addStretch()
+        tc_layout.addLayout(cw_btn_row)
+
+        layout.addWidget(tc_box)
+
+        # ── 4. Data fusion ────────────────────────────────────────────
+        df_box = QGroupBox("Data fusion")
+        df_form = QFormLayout(df_box)
+
+        self.chk_use_era5 = QCheckBox(
+            "ERA5 meteorological co-drivers (temp, wind, precip, soil moisture)"
+        )
+        self.chk_use_era5.setToolTip(
+            "Fetch ERA5-Land hourly temperature, u/v wind, precipitation, and\n"
+            "volumetric soil water, averaged over each composite window.\n"
+            "Default: off. Source: ECMWF/ERA5_LAND/HOURLY on GEE."
+        )
+        df_form.addRow(self.chk_use_era5)
+
+        self.chk_use_firms = QCheckBox("Overlay FIRMS active fires (VIIRS + MODIS)")
+        self.chk_use_firms.setToolTip(
+            "Aggregate NASA FIRMS active fire detections per cell over each\n"
+            "composite window and export a fires.gpkg point layer.\n"
+            "Default: off. Source: NOAA/VIIRS/001/VNP14A1, MODIS/061/MOD14A1."
+        )
+        df_form.addRow(self.chk_use_firms)
+
+        self.firms_sensors_combo = QComboBox()
+        self.firms_sensors_combo.addItems(["Both", "VIIRS only", "MODIS only"])
+        self.firms_sensors_combo.setToolTip(
+            "Which FIRMS sensor(s) to include. Default: Both. VIIRS offers\n"
+            "higher sensitivity (375 m) but shorter archive; MODIS has the\n"
+            "longer record."
+        )
+        df_form.addRow("    FIRMS sensors:", self.firms_sensors_combo)
+
+        self.chk_use_no2_cotracer = QCheckBox(
+            "Classify hotspot source type using TROPOMI NO2 co-tracer"
+        )
+        self.chk_use_no2_cotracer.setToolTip(
+            "Fetch TROPOMI NO₂ and tag each CH₄ hotspot as combustion (high\n"
+            "NO₂), biogenic (low NO₂), or ambiguous. Default: off. Source:\n"
+            "COPERNICUS/S5P/OFFL/L3_NO2."
+        )
+        df_form.addRow(self.chk_use_no2_cotracer)
+
+        self.no2_high_pct_spin = QSpinBox()
+        self.no2_high_pct_spin.setRange(50, 99)
+        self.no2_high_pct_spin.setValue(80)
+        self.no2_high_pct_spin.setSuffix("% (high NO2)")
+        self.no2_high_pct_spin.setToolTip(
+            "NO₂ percentile above which a hotspot is classified as\n"
+            "combustion-dominant. Default: 80."
+        )
+        df_form.addRow("    NO₂ high percentile:", self.no2_high_pct_spin)
+
+        self.no2_low_pct_spin = QSpinBox()
+        self.no2_low_pct_spin.setRange(1, 50)
+        self.no2_low_pct_spin.setValue(40)
+        self.no2_low_pct_spin.setSuffix("% (low NO2)")
+        self.no2_low_pct_spin.setToolTip(
+            "NO₂ percentile below which a hotspot is classified as\n"
+            "biogenic-dominant. Default: 40."
+        )
+        df_form.addRow("    NO₂ low percentile:", self.no2_low_pct_spin)
+
+        self.chk_use_livestock = QCheckBox(
+            "Include livestock density (FAO GLW4) and IPCC enteric CH4 baseline"
+        )
+        self.chk_use_livestock.setToolTip(
+            "Load FAO Gridded Livestock of the World v4 density rasters and\n"
+            "compute IPCC 2019 Tier 1 Asian default enteric CH₄ per cell.\n"
+            "Default: off. Source: FAO GLW4 (Gilbert et al. 2018)."
+        )
+        df_form.addRow(self.chk_use_livestock)
+
+        self.glw4_cattle_edit  = self._glw4_row(df_form, "Cattle raster:",  "cattle")
+        self.glw4_buffalo_edit = self._glw4_row(df_form, "Buffalo raster:", "buffalo")
+        self.glw4_goat_edit    = self._glw4_row(df_form, "Goat raster:",    "goat")
+        self.glw4_sheep_edit   = self._glw4_row(df_form, "Sheep raster:",   "sheep")
+
+        glw4_link = QLabel(
+            '    <a href="https://dataverse.harvard.edu/dataset.xhtml?'
+            'persistentId=doi:10.7910/DVN/GIVQ75">Download GLW4 from Harvard Dataverse</a>'
+        )
+        glw4_link.setOpenExternalLinks(True)
+        df_form.addRow("", glw4_link)
+
+        layout.addWidget(df_box)
+
+        # ── 5. Quality & uncertainty ──────────────────────────────────
+        qu_box = QGroupBox("Quality & uncertainty")
+        qu_form = QFormLayout(qu_box)
+
+        self.chk_strict_tropomi_qa = QCheckBox(
+            "Apply strict TROPOMI quality filters (L2-based)"
+        )
+        self.chk_strict_tropomi_qa.setToolTip(
+            "Fetch TROPOMI CH₄ from the L2 product with SRON-recommended\n"
+            "filters: qa_value ≥ 0.5, albedo > 0.05, cloud_fraction < 0.3.\n"
+            "Default: off (uses L3 with sensor_zenith < 70°)."
+        )
+        qu_form.addRow(self.chk_strict_tropomi_qa)
+
+        self.tropomi_qa_spin = QDoubleSpinBox()
+        self.tropomi_qa_spin.setRange(0.0, 1.0)
+        self.tropomi_qa_spin.setSingleStep(0.05)
+        self.tropomi_qa_spin.setDecimals(2)
+        self.tropomi_qa_spin.setValue(0.5)
+        self.tropomi_qa_spin.setToolTip(
+            "Minimum TROPOMI qa_value for a retrieval to be kept in strict\n"
+            "mode. Default: 0.5. Source: SRON TROPOMI CH₄ user guide."
+        )
+        qu_form.addRow("    qa_value threshold:", self.tropomi_qa_spin)
+
+        self.tropomi_albedo_spin = QDoubleSpinBox()
+        self.tropomi_albedo_spin.setRange(0.0, 0.5)
+        self.tropomi_albedo_spin.setSingleStep(0.01)
+        self.tropomi_albedo_spin.setDecimals(2)
+        self.tropomi_albedo_spin.setValue(0.05)
+        self.tropomi_albedo_spin.setToolTip(
+            "Minimum surface albedo for TROPOMI retrieval to be kept.\n"
+            "Default: 0.05. Low albedo (dark water) produces poor retrievals."
+        )
+        qu_form.addRow("    albedo threshold:", self.tropomi_albedo_spin)
+
+        self.tropomi_cloud_spin = QDoubleSpinBox()
+        self.tropomi_cloud_spin.setRange(0.0, 1.0)
+        self.tropomi_cloud_spin.setSingleStep(0.05)
+        self.tropomi_cloud_spin.setDecimals(2)
+        self.tropomi_cloud_spin.setValue(0.3)
+        self.tropomi_cloud_spin.setToolTip(
+            "Maximum cloud fraction for TROPOMI retrieval to be kept.\n"
+            "Default: 0.3."
+        )
+        qu_form.addRow("    cloud fraction threshold:", self.tropomi_cloud_spin)
+
+        self.chk_inverse_variance_weighting = QCheckBox(
+            "Inverse-variance weighted XCO2 gridding (recommended)"
+        )
+        self.chk_inverse_variance_weighting.setChecked(True)
+        self.chk_inverse_variance_weighting.setToolTip(
+            "Weight each OCO/GOSAT retrieval by 1/σ² when computing per-cell\n"
+            "XCO₂ means. Produces a companion stderr raster. Default: ON\n"
+            "(strict improvement over arithmetic mean). Source: OCO-2/3 L2\n"
+            "user guide."
+        )
+        qu_form.addRow(self.chk_inverse_variance_weighting)
+
+        self.min_retrievals_spin = QSpinBox()
+        self.min_retrievals_spin.setRange(1, 1000)
+        self.min_retrievals_spin.setValue(5)
+        self.min_retrievals_spin.setToolTip(
+            "Cells with fewer than this many valid retrievals are masked as\n"
+            "NoData in the composite and flagged `insufficient_data=1`.\n"
+            "Default: 5."
+        )
+        qu_form.addRow("Minimum retrievals per cell:", self.min_retrievals_spin)
+
+        self.chk_caaqms_bias = QCheckBox(
+            "Apply CAAQMS bias calibration to satellite composite"
+        )
+        self.chk_caaqms_bias.setEnabled(False)
+        self.chk_caaqms_bias.setToolTip(
+            "Compute per-station bias (station − satellite), IDW-interpolate\n"
+            "the bias field across the AOI, and subtract from the composite.\n"
+            "Enabled only when a CAAQMS CSV is loaded. Default: off."
+        )
+        qu_form.addRow(self.chk_caaqms_bias)
+
+        self.idw_power_spin = QDoubleSpinBox()
+        self.idw_power_spin.setRange(0.5, 5.0)
+        self.idw_power_spin.setSingleStep(0.5)
+        self.idw_power_spin.setDecimals(1)
+        self.idw_power_spin.setValue(2.0)
+        self.idw_power_spin.setToolTip(
+            "Inverse distance weighting power for CAAQMS bias interpolation\n"
+            "and SOC point rasterization. Default: 2.0."
+        )
+        qu_form.addRow("    IDW power:", self.idw_power_spin)
+
+        layout.addWidget(qu_box)
+
+        # ── 6. Scoring & scale ────────────────────────────────────────
+        ss_box = QGroupBox("Scoring & scale")
+        ss_form = QFormLayout(ss_box)
+
+        self.chk_compute_priority = QCheckBox(
+            "Compute SOC × emission priority score"
+        )
+        self.chk_compute_priority.setToolTip(
+            "Combine normalized emission signal × normalized (1/SOC) into a\n"
+            "priority score and priority_map.tif. Highlights cells with high\n"
+            "emission AND low SOC (mitigation headroom). Default: off."
+        )
+        ss_form.addRow(self.chk_compute_priority)
+
+        self.chk_multiscale_fine = QCheckBox(
+            "Also generate OCO-native fine-grid composite"
+        )
+        self.chk_multiscale_fine.setToolTip(
+            "Additionally produce xco2_composite_fine.tif at OCO's native\n"
+            "resolution (~0.02°) alongside the coarse grid. Same inv-var and\n"
+            "min-retrievals settings apply. Default: off."
+        )
+        ss_form.addRow(self.chk_multiscale_fine)
+
+        self.fine_grid_res_spin = QDoubleSpinBox()
+        self.fine_grid_res_spin.setRange(0.01, 0.1)
+        self.fine_grid_res_spin.setSingleStep(0.01)
+        self.fine_grid_res_spin.setDecimals(2)
+        self.fine_grid_res_spin.setValue(0.02)
+        self.fine_grid_res_spin.setSuffix(" °")
+        self.fine_grid_res_spin.setToolTip(
+            "Fine-grid resolution for the optional multi-scale composite.\n"
+            "Default: 0.02° ≈ 2.2 km (OCO native footprint)."
+        )
+        ss_form.addRow("    Fine grid resolution:", self.fine_grid_res_spin)
+
+        layout.addWidget(ss_box)
+
+        # ── Live summary ──────────────────────────────────────────────
+        self.methodology_summary_label = QLabel("Active features: (none)")
+        self.methodology_summary_label.setWordWrap(True)
+        self.methodology_summary_label.setStyleSheet(
+            "background: #f0f0f0; padding: 6px; font-style: italic;"
+            " border-radius: 4px;"
+        )
+        layout.addWidget(self.methodology_summary_label)
+
+        layout.addStretch()
+
+        # Wire live-summary updates (Task 9.3) — connect AFTER all widgets exist.
+        for chk in [
+            self.chk_enhancement_mode, self.chk_estimate_flux,
+            self.chk_cropland_mask, self.chk_include_grassland,
+            self.chk_use_era5, self.chk_use_firms, self.chk_use_no2_cotracer,
+            self.chk_use_livestock, self.chk_strict_tropomi_qa,
+            self.chk_inverse_variance_weighting, self.chk_caaqms_bias,
+            self.chk_compute_priority, self.chk_multiscale_fine,
+        ]:
+            chk.stateChanged.connect(self._update_methodology_summary)
+        self.compositing_mode_combo.currentIndexChanged.connect(
+            self._update_methodology_summary
+        )
+
+        # Initial state
+        self._update_methodology_summary()
+
+        return w
+
+    def _glw4_row(self, form_layout, label, species):
+        """Build one indented 'Browse…' row for a GLW4 livestock raster path."""
+        row = QHBoxLayout()
+        edit = QLineEdit()
+        edit.setPlaceholderText(f"Path to FAO GLW4 {species} GeoTIFF …")
+        edit.setToolTip(
+            f"Path to the FAO GLW4 {species} density GeoTIFF (head/km²).\n"
+            "Leave blank to skip this species. Source: FAO GLW4 (2020),\n"
+            "IPCC 2019 Tier 1 Asian enteric CH₄ defaults."
+        )
+        btn = QPushButton("Browse…")
+        btn.setToolTip(f"Select the FAO GLW4 {species} density GeoTIFF.")
+        btn.clicked.connect(lambda: self._browse_glw4(edit))
+        row.addWidget(edit)
+        row.addWidget(btn)
+        form_layout.addRow("    " + label, row)
+        return edit
+
+    def _browse_glw4(self, line_edit):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FAO GLW4 GeoTIFF", "",
+            "GeoTIFF (*.tif *.tiff);;All files (*)",
+        )
+        if path:
+            line_edit.setText(path)
+
+    def _on_compositing_mode_changed(self, *_args):
+        """Show/hide the custom-windows table based on selected mode (Task 9.6)."""
+        is_custom = (self.compositing_mode_combo.currentText() == "Custom windows")
+        self.custom_windows_table.setVisible(is_custom)
+        self.custom_windows_helper_lbl.setVisible(is_custom)
+        self.btn_add_window.setVisible(is_custom)
+        self.btn_remove_window.setVisible(is_custom)
+
+    def _on_add_custom_window(self):
+        """Insert a blank row into the custom windows table (Task 9.6)."""
+        r = self.custom_windows_table.rowCount()
+        self.custom_windows_table.insertRow(r)
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.custom_windows_table.setItem(r, 0, QTableWidgetItem(f"window_{r+1}"))
+        self.custom_windows_table.setItem(r, 1, QTableWidgetItem(today))
+        self.custom_windows_table.setItem(r, 2, QTableWidgetItem(today))
+
+    def _on_remove_custom_window(self):
+        """Remove the currently-selected row from the custom windows table."""
+        rows = sorted({i.row() for i in self.custom_windows_table.selectedItems()},
+                      reverse=True)
+        if not rows:
+            # Fall back to last row if nothing is explicitly selected.
+            n = self.custom_windows_table.rowCount()
+            if n > 0:
+                self.custom_windows_table.removeRow(n - 1)
+            return
+        for r in rows:
+            self.custom_windows_table.removeRow(r)
+
+    def _collect_custom_windows(self):
+        """Return non-empty custom-window rows as a list of dicts (Task 9.4)."""
+        windows = []
+        for r in range(self.custom_windows_table.rowCount()):
+            def cell(c):
+                item = self.custom_windows_table.item(r, c)
+                return item.text().strip() if item else ""
+            name  = cell(0)
+            start = cell(1)
+            end   = cell(2)
+            # Skip rows with any empty field (graceful handling — Task 9.6).
+            if not name or not start or not end:
+                continue
+            windows.append({"name": name, "start": start, "end": end})
+        return windows
+
+    def _validate_custom_windows(self, windows):
+        """Return a list of human-readable error messages for invalid rows (Task 5.3).
+
+        Rules:
+          • At least one row must be present (Req 3.4).
+          • Name must be non-empty.
+          • Start and End must parse as YYYY-MM-DD.
+          • End must be ≥ Start.
+        """
+        errs = []
+        if not windows:
+            errs.append("Custom mode requires at least one window.")
+            return errs
+        for i, w in enumerate(windows, start=1):
+            name  = (w.get("name")  or "").strip()
+            start = (w.get("start") or "").strip()
+            end   = (w.get("end")   or "").strip()
+            row_label = f"Row {i} ({name or '<unnamed>'})"
+            if not name:
+                errs.append(f"{row_label}: name is required.")
+            try:
+                d_start = datetime.strptime(start, "%Y-%m-%d").date() if start else None
+            except ValueError:
+                d_start = None
+                errs.append(f"{row_label}: start date '{start}' is not YYYY-MM-DD.")
+            try:
+                d_end = datetime.strptime(end, "%Y-%m-%d").date() if end else None
+            except ValueError:
+                d_end = None
+                errs.append(f"{row_label}: end date '{end}' is not YYYY-MM-DD.")
+            if d_start is None and start == "":
+                errs.append(f"{row_label}: start date is required.")
+            if d_end is None and end == "":
+                errs.append(f"{row_label}: end date is required.")
+            if d_start is not None and d_end is not None and d_end < d_start:
+                errs.append(f"{row_label}: end date must be ≥ start date.")
+        return errs
+
+    def _update_methodology_summary(self, *_args):
+        """Refresh the 'Active features' label based on current widget state (Task 9.3)."""
+        parts = []
+        if self.chk_enhancement_mode.isChecked():
+            parts.append("enhancement mode")
+        if self.chk_estimate_flux.isChecked() and self.chk_estimate_flux.isEnabled():
+            parts.append("mass-balance flux")
+        if self.chk_cropland_mask.isChecked():
+            crop = "cropland mask"
+            if self.chk_include_grassland.isChecked():
+                crop += " (+grassland)"
+            parts.append(crop)
+        mode = self.compositing_mode_combo.currentText()
+        if mode == "Monthly":
+            parts.append("monthly composites")
+        elif mode.startswith("Kharif"):
+            parts.append("seasonal (kharif/rabi/zaid) composites")
+        elif mode == "Custom windows":
+            parts.append("custom compositing windows")
+        if self.chk_use_era5.isChecked():
+            parts.append("ERA5 meteorology")
+        if self.chk_use_firms.isChecked():
+            parts.append("FIRMS fires")
+        if self.chk_use_no2_cotracer.isChecked():
+            parts.append("NO₂ co-tracer")
+        if self.chk_use_livestock.isChecked():
+            parts.append("livestock density")
+        if self.chk_strict_tropomi_qa.isChecked():
+            parts.append("strict TROPOMI QA")
+        if self.chk_inverse_variance_weighting.isChecked():
+            parts.append("inverse-variance weighting")
+        if self.chk_caaqms_bias.isChecked() and self.chk_caaqms_bias.isEnabled():
+            parts.append("CAAQMS bias calibration")
+        if self.chk_compute_priority.isChecked():
+            parts.append("SOC×emission priority")
+        if self.chk_multiscale_fine.isChecked():
+            parts.append("OCO-native fine grid")
+
+        if not parts:
+            text = "Active features: (none)"
+        else:
+            text = "Active features: " + ", ".join(parts)
+        # If the only active feature is the default inverse-variance weighting,
+        # annotate it so new users know why something is active out of the box.
+        active_non_default = [
+            p for p in parts if p != "inverse-variance weighting"
+        ]
+        if parts == ["inverse-variance weighting"] and not active_non_default:
+            text = "Active features: inverse-variance weighting (default)"
+        self.methodology_summary_label.setText(text)
+
+    def _update_flux_availability(self, *_args):
+        """Enable the flux checkbox only when enhancement + ERA5 are both on (Task 9.5)."""
+        if not hasattr(self, "chk_estimate_flux"):
+            return
+        available = (self.chk_enhancement_mode.isChecked()
+                     and self.chk_use_era5.isChecked())
+        self.chk_estimate_flux.setEnabled(available)
+        if not available and self.chk_estimate_flux.isChecked():
+            self.chk_estimate_flux.setChecked(False)
+
+    def _update_caaqms_bias_availability(self, *_args):
+        """Enable CAAQMS bias calibration only when a CAAQMS CSV is loaded (Task 9.5)."""
+        if not hasattr(self, "chk_caaqms_bias") or not hasattr(self, "caaqms_path"):
+            return
+        available = bool(self.caaqms_path.text().strip())
+        self.chk_caaqms_bias.setEnabled(available)
+        if not available and self.chk_caaqms_bias.isChecked():
+            self.chk_caaqms_bias.setChecked(False)
+
     # ---- Tab 2: Ground Truth (SOC / SIC) ----------------------------
 
     def _tab_ground_truth(self):
@@ -468,9 +1184,9 @@ class GHGMapperDialog(QDialog):
         hyp_box = QGroupBox("Hyperspectral SOC Prediction Raster (optional)")
         hyp_form = QFormLayout(hyp_box)
         hyp_info = QLabel(
-            "If you have a SOC prediction raster (GeoTIFF) from your PLSR/RF model "
-            "on the Udaipur hyperspectral dataset, load it here. It will be resampled "
-            "to the 0.1° grid and used as a continuous carbon surface layer."
+            "If you have a SOC prediction raster (GeoTIFF) from a hyperspectral model, "
+            "load it here. It will be resampled to the 0.1° grid and used as a "
+            "continuous carbon surface layer."
         )
         hyp_info.setWordWrap(True)
         hyp_form.addRow(hyp_info)
@@ -745,26 +1461,6 @@ class GHGMapperDialog(QDialog):
         run_info.setStyleSheet("padding: 6px; background: #eafaf1; border-radius: 4px;")
         layout.addWidget(run_info)
 
-        # CAAQMS option
-        caaqms_box = QGroupBox("CAAQMS Validation (optional)")
-        caaqms_form = QFormLayout(caaqms_box)
-        caaqms_note = QLabel(
-            "If you have downloaded CAAQMS CSV files from the CPCB portal "
-            "(app.cpcbccr.com), point to the folder here. The pipeline will "
-            "use NO₂ and CO as combustion co-tracers to validate satellite hotspots."
-        )
-        caaqms_note.setWordWrap(True)
-        caaqms_form.addRow(caaqms_note)
-        caaqms_row = QHBoxLayout()
-        self.caaqms_dir_edit = QLineEdit()
-        self.caaqms_dir_edit.setPlaceholderText("Folder containing CAAQMS CSV files (leave blank to skip)…")
-        btn_browse_caaqms = QPushButton("Browse…")
-        btn_browse_caaqms.clicked.connect(self._browse_caaqms_dir)
-        caaqms_row.addWidget(self.caaqms_dir_edit)
-        caaqms_row.addWidget(btn_browse_caaqms)
-        caaqms_form.addRow("CAAQMS folder:", caaqms_row)
-        layout.addWidget(caaqms_box)
-
         # Composite resolution
         grid_box = QGroupBox("Grid Settings")
         grid_form = QFormLayout(grid_box)
@@ -886,11 +1582,6 @@ class GHGMapperDialog(QDialog):
         if d:
             self.output_dir_edit.setText(d)
 
-    def _browse_caaqms_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select CAAQMS CSV Folder")
-        if d:
-            self.caaqms_dir_edit.setText(d)
-
     def _browse_raster(self, line_edit):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select GeoTIFF", "", "GeoTIFF (*.tif *.tiff);;All files (*)"
@@ -1002,6 +1693,70 @@ class GHGMapperDialog(QDialog):
         except Exception as e:
             self.nies_status_lbl.setText(f"❌  {e}")
             self.nies_status_lbl.setStyleSheet("color: #c0392b;")
+
+    def _on_refresh_cmr_versions(self):
+        """Query NASA CMR and refresh OCO-2 / OCO-3 / GOSAT version fields.
+
+        Uses the same dynamic-import pattern as ``PipelineWorker.run`` so we
+        don't require the pipeline module to be importable at dialog
+        construction time. Never raises: any failure is swallowed and
+        reported via ``self.cmr_refresh_status``.
+        """
+        try:
+            import sys, os, importlib.util
+            _run_pipeline_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'src', 'ghg_mapper', 'pipeline', 'run_pipeline.py'
+            )
+            _spec = importlib.util.spec_from_file_location(
+                "ghg_mapper.pipeline.run_pipeline", _run_pipeline_path
+            )
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules["ghg_mapper.pipeline.run_pipeline"] = _mod
+            _spec.loader.exec_module(_mod)
+            discover_cmr_versions = _mod.discover_cmr_versions
+        except Exception as e:
+            self.cmr_refresh_status.setText(
+                f"<span style='color:#c0392b'>⚠ Could not load pipeline helper: {e}</span>"
+            )
+            return
+
+        targets = [
+            ("OCO-2",  "OCO2_L2_Lite_FP", self.oco2_version_edit),
+            ("OCO-3",  "OCO3_L2_Lite_FP", self.oco3_version_edit),
+            ("GOSAT",  "ACOS_L2_Lite_FP", self.gosat_version_edit),
+        ]
+        self.cmr_refresh_status.setText("Querying NASA CMR …")
+        updates = []
+        failures = []
+        for label, short_name, edit in targets:
+            try:
+                versions = discover_cmr_versions(short_name)
+            except Exception as e:
+                versions = []
+                self.log(f"CMR: {short_name} raised {e!r} — ignored")
+            if versions:
+                newest = versions[0]
+                edit.setText(newest)
+                updates.append(f"{label}={newest}")
+                self.log(f"CMR: {short_name} available versions: {versions[:5]}")
+            else:
+                failures.append(label)
+                self.log(f"CMR: {short_name} version discovery failed — field unchanged")
+
+        if updates and not failures:
+            self.cmr_refresh_status.setText(
+                f"<span style='color:#1e8449'>✓ Refreshed: {', '.join(updates)}</span>"
+            )
+        elif updates and failures:
+            self.cmr_refresh_status.setText(
+                f"<span style='color:#d35400'>✓ Refreshed: {', '.join(updates)} "
+                f"(failed: {', '.join(failures)})</span>"
+            )
+        else:
+            self.cmr_refresh_status.setText(
+                "<span style='color:#c0392b'>⚠ CMR unreachable — fields unchanged</span>"
+            )
 
     def _load_earthdata_netrc(self):
         """Pre-fill EarthData credentials from ~/.netrc (same convention as the reference repo)."""
@@ -1157,10 +1912,59 @@ class GHGMapperDialog(QDialog):
             "date_end":     self.date_end.date().toString("yyyy-MM-dd"),
             "output_dir":   self.output_dir_edit.text().strip(),
             "grid_res":     self.grid_res_spin.value(),
-            "caaqms_dir":   self.caaqms_dir_edit.text().strip() or None,
+            "caaqms_dir":   self.caaqms_path.text().strip() or None,
             "soil_records": self._collect_soil_records(),
             "hyp_soc_raster": self.hyp_soc_edit.text().strip() or None,
             "hyp_sic_raster": self.hyp_sic_edit.text().strip() or None,
+            "cmr_spatial_buffer": self.cmr_buffer_spin.value(),
+            "oco2_version":  self.oco2_version_edit.text().strip() or None,
+            "oco3_version":  self.oco3_version_edit.text().strip() or None,
+            "gosat_version": self.gosat_version_edit.text().strip() or None,
+
+            # ── Methodology tab (Task 9.4) ───────────────────────────
+            "enhancement_mode":          self.chk_enhancement_mode.isChecked(),
+            "background_window_deg":     self.background_window_spin.value(),
+            "background_percentile":     self.background_pct_spin.value(),
+            "ch4_threshold_ppb":         self.ch4_threshold_spin.value(),
+            "xco2_threshold_ppm":        self.xco2_threshold_spin.value(),
+            "cropland_mask":             self.chk_cropland_mask.isChecked(),
+            "include_grassland":         self.chk_include_grassland.isChecked(),
+            "compositing_mode":          {
+                "Whole period": "whole_period",
+                "Monthly": "monthly",
+                "Kharif / Rabi / Zaid (Indian seasons)": "seasonal_in",
+                "Custom windows": "custom",
+            }[self.compositing_mode_combo.currentText()],
+            "custom_windows":            self._collect_custom_windows(),
+            "estimate_flux":             (self.chk_estimate_flux.isChecked()
+                                          and self.chk_estimate_flux.isEnabled()),
+            "use_era5":                  self.chk_use_era5.isChecked(),
+            "use_firms":                 self.chk_use_firms.isChecked(),
+            "firms_sensors":             {
+                "Both": "both",
+                "VIIRS only": "viirs",
+                "MODIS only": "modis",
+            }[self.firms_sensors_combo.currentText()],
+            "use_livestock":             self.chk_use_livestock.isChecked(),
+            "glw4_cattle_path":          self.glw4_cattle_edit.text().strip() or None,
+            "glw4_buffalo_path":         self.glw4_buffalo_edit.text().strip() or None,
+            "glw4_goat_path":            self.glw4_goat_edit.text().strip() or None,
+            "glw4_sheep_path":           self.glw4_sheep_edit.text().strip() or None,
+            "use_no2_cotracer":          self.chk_use_no2_cotracer.isChecked(),
+            "no2_high_percentile":       self.no2_high_pct_spin.value(),
+            "no2_low_percentile":        self.no2_low_pct_spin.value(),
+            "strict_tropomi_qa":         self.chk_strict_tropomi_qa.isChecked(),
+            "tropomi_qa_threshold":      self.tropomi_qa_spin.value(),
+            "tropomi_albedo_threshold":  self.tropomi_albedo_spin.value(),
+            "tropomi_cloud_threshold":   self.tropomi_cloud_spin.value(),
+            "inverse_variance_weighting": self.chk_inverse_variance_weighting.isChecked(),
+            "min_retrievals_per_cell":   self.min_retrievals_spin.value(),
+            "caaqms_bias_correction":    (self.chk_caaqms_bias.isChecked()
+                                          and self.chk_caaqms_bias.isEnabled()),
+            "idw_power":                 self.idw_power_spin.value(),
+            "compute_priority":          self.chk_compute_priority.isChecked(),
+            "multiscale_fine_grid":      self.chk_multiscale_fine.isChecked(),
+            "fine_grid_res":             self.fine_grid_res_spin.value(),
         }
 
     def _on_run(self):
@@ -1173,6 +1977,15 @@ class GHGMapperDialog(QDialog):
             errors.append("GEE Project ID is required (Setup tab).")
         if not config["output_dir"]:
             errors.append("Output directory is required (Setup tab).")
+
+        # Custom-windows validation (Task 5.3) — only when Custom mode is active.
+        if config.get("compositing_mode") == "custom":
+            win_errs = self._validate_custom_windows(config.get("custom_windows", []))
+            if win_errs:
+                QMessageBox.warning(
+                    self, "Invalid custom windows", "\n".join(win_errs),
+                )
+                return
 
         # Count credentialled + checked sources
         sats = config["satellites"]
@@ -1217,7 +2030,7 @@ class GHGMapperDialog(QDialog):
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.tabs.setCurrentIndex(3)  # show Run tab
+        self.tabs.setCurrentIndex(4)  # show Run tab (Setup=0, Methodology=1, GT=2, CAAQMS=3, Run=4, Results=5)
 
         self.worker = PipelineWorker(config)
         self.worker.log_signal.connect(self.log)
@@ -1241,7 +2054,7 @@ class GHGMapperDialog(QDialog):
                 f"Last run: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
                 f"Output folder: {output_dir}"
             )
-            self.tabs.setCurrentIndex(4)  # jump to Results tab
+            self.tabs.setCurrentIndex(5)  # jump to Results tab
             QMessageBox.information(
                 self, "Done",
                 "Pipeline finished successfully.\n\n"
