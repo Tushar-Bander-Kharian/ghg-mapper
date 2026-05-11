@@ -3,14 +3,6 @@
 **Multi-satellite GHG hotspot mapping with SOC/SIC ground-truth integration.**  
 A QGIS plugin + Python backend for no-code satellite emission analysis.
 
-## Compatibility
-
-| Version | QGIS | Qt | Python |
-|---------|------|----|--------|
-| 1.1.2   | 4.0+ | Qt6 / PyQt6 | 3.12+ |
-| 1.1.0   | 4.0+ | Qt6 / PyQt6 | 3.12+ |
-| 0.1.0   | 3.22–3.99 | Qt5 / PyQt5 | 3.9+ |
-
 ---
 
 ## What it does
@@ -20,140 +12,169 @@ GHG Mapper merges retrievals from TROPOMI (CH₄), OCO-2/OCO-3 (XCO₂), and GOS
 It integrates your field-measured SOC and SIC values through a point-and-click
 dialog — no Python coding required.
 
-- Validates hotspots against CPCB CAAQMS ground stations — load your
-  5-year continuous monitoring CSV (PM10, PM2.5, SO2, NO, NO2, NOX, NH3,
-  CO, O3, Benzene, Toluene, Ethylbenzene, MP-Xylene, O-Xylene + met variables)
-  directly through the point-and-click UI. Outputs RMSE, mean bias, and
-  Pearson r per pollutant per station.
-
-Built on the workflow described in:
-> Bander, T. (2024). *Multi-Satellite GHG Emission Hotspot Mapping over Agricultural India.*
-
----
-
-## Account Setup (required before first run)
-
-The plugin pulls data from three separate services. Each requires a free account.
-
-### Google Earth Engine (TROPOMI CH₄)
-
-1. Sign up at https://earthengine.google.com/signup/
-2. Create a Cloud project at https://console.cloud.google.com/
-3. In the plugin **Setup** tab enter your project ID (e.g. `my-gee-project`) and click **Authenticate**.
-
-### NASA EarthData (OCO-2, OCO-3, GOSAT XCO₂)
-
-OCO-2/3 and GOSAT XCO₂ data are served by NASA GES DISC and require an
-EarthData account **plus** explicit approval of the GES DISC application.
-Both steps are mandatory — skipping the application approval causes a
-`401 Pre-authorization required` error even with otherwise correct credentials.
-
-**Step 1 — Create a free EarthData account**
-
-Go to https://urs.earthdata.nasa.gov/users/new and register.
-Keep your username and password — you will enter them in the plugin Setup tab.
-
-**Step 2 — Approve the GES DISC application**
-
-While logged in to EarthData, open this URL in your browser:
-
-```
-https://urs.earthdata.nasa.gov/approve_app?client_id=e2WVk8Pw6weeLUKZYOxvTQ
-```
-
-Click **Approve**. This grants the plugin permission to download OCO-2/3 and
-GOSAT granules from `data.gesdisc.earthdata.nasa.gov`. You only need to do
-this once per EarthData account.
-
-**Step 3 — Enter credentials in the plugin**
-
-In the **Setup** tab, fill in:
-- **EarthData username** — your `urs.earthdata.nasa.gov` username
-- **EarthData password** — your `urs.earthdata.nasa.gov` password
-
-The plugin writes these to `~/.netrc` automatically so the download session
-can authenticate. The file is created with permission `600` (owner-read only).
-
-**Datasets downloaded**
-
-| Dataset | Short name | Version | Variable |
-|---------|-----------|---------|----------|
-| OCO-2 L2 Lite FP | `OCO2_L2_Lite_FP` | 11.2r | XCO₂, quality_flag = 0 |
-| OCO-3 L2 Lite FP | `OCO3_L2_Lite_FP` | 10.4r | XCO₂, quality_flag = 0 |
-| GOSAT ACOS L2 Lite | `ACOS_L2_Lite_FP` | 9r | XCO₂, quality_flag = 0 |
-
-### NIES GOSAT Portal (GOSAT XCH₄, optional)
-
-GOSAT XCH₄ (TANSO-FTS SWIR) is distributed via SFTP by NIES Japan.
-
-1. Register at https://prdct.gosat-2.nies.go.jp/en/aboutdata/directsftpaccess.html
-2. After approval (usually 1–3 business days) you receive SFTP credentials by email.
-3. Enter them in the plugin **Setup** tab under **NIES GOSAT Login**.
-
-NIES credentials are optional. The pipeline runs with ≥2 available sources, so
-TROPOMI + any one EarthData satellite is sufficient to start.
+Built on the workflow described in:  
+> Bander, T. (2024). *Multi-Satellite GHG Emission Hotspot Mapping over Agricultural India.*  
+> Amity University, Noida.
 
 ---
 
 ## Quick Start
 
-### 1. Install Python packages
-
-Open **OSGeo4W Shell** (installed with QGIS — search Start menu):
+### 1. Install backend dependencies
 
 ```bash
-pip install requests pydap paramiko
+conda env create -f environment.yml
+conda activate ghg-mapper
 ```
-
-`h5py` and `netCDF4` are optional — the plugin falls back to GDAL (bundled
-with QGIS) to read OCO granule files if neither is available.
 
 ### 2. Install the QGIS plugin
 
-Copy the `ghg_mapper_plugin/` folder to your QGIS plugins directory:
+Copy the `plugins/ghg_mapper/` folder to your QGIS plugins directory:
 
-- **Windows**: `%APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\`
-- **Linux/Mac**: `~/.local/share/QGIS/QGIS4/profiles/default/python/plugins/`
+- **Windows**: `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`
+- **Linux/Mac**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
 
 Then in QGIS: *Plugins → Manage and Install Plugins → Installed → ✅ GHG Mapper*
 
-### 3. Open the dialog
+### 3. Authenticate with Google Earth Engine
 
-**Raster → GHG Mapper → Open GHG Mapper**
+In QGIS, open the plugin (`Raster → GHG Mapper → Open GHG Mapper`),
+go to the **Setup** tab, enter your GEE project ID, and click **Authenticate**.
 
-### 4. Fill in the Setup tab
+Free GEE account: https://earthengine.google.com/signup/
 
-- GEE project ID → click **Authenticate**
-- EarthData username and password (see Account Setup above)
-- NIES username and password (optional — only needed for GOSAT XCH₄)
+### 4. Enter your SOC/SIC values
 
-The green/red availability indicator shows how many data sources are credentialled.
-The pipeline requires at least 2 available sources before it will run.
+On the **Ground Truth** tab, type or import your field sample values.
+SOC from Walkley-Black? Tick the correction factor checkbox — it applies ×1.334 automatically.
 
-### 5. Enter SOC/SIC values (optional)
+### 5. Run
 
-On the **Ground Truth** tab, type or import field sample values.
-Tick the Walkley-Black checkbox if your SOC was measured by the Walkley-Black
-method — it applies the ×1.334 recovery correction automatically.
+Click **▶ Run Pipeline** on the Run tab. Outputs appear in your chosen folder.
 
-### 6. Run
+---
 
-Set the date range and output folder on the **Run** tab, then click **▶ Run Pipeline**.
-Outputs appear in your chosen folder when the pipeline completes.
+## Methodology options (v0.3)
+
+The v0.3 release adds 17 opt-in methodology upgrades grouped under a new
+**Methodology** tab in the dialog. Every option defaults to "off" (or to the
+pre-0.3 behavior). A vanilla run with the Methodology tab untouched produces
+output byte-identical to v0.1 / v0.2, so existing workflows keep working.
+
+### Credential matrix
+
+| Feature group                     | GEE | EarthData | User-supplied files |
+|-----------------------------------|-----|-----------|---------------------|
+| Enhancement / masking / compositing / inv-variance / priority | ✓ | ✓ (for OCO/GOSAT XCO₂) | — |
+| ERA5, FIRMS, NO₂, WorldCover, strict TROPOMI L2 | ✓ | — | — |
+| Livestock density (FAO GLW4)      | —   | —         | GLW4 GeoTIFFs (`cattle`, `buffalo`, `goat`, `sheep`) |
+| CAAQMS bias calibration           | —   | —         | CPCB CAAQMS CSV (already in v0.2) |
+
+### Hotspot classification
+
+**Use enhancement above background** (`enhancement_mode`)
+Switches the hotspot rule from "concentration ≥ 90th-percentile of AOI" to
+"enhancement ≥ threshold", where enhancement is concentration minus a local
+percentile background. Enable whenever regional gradients (e.g. IGP haze,
+seasonal XCO₂ cycle) risk biasing the classifier. Exposes a window size,
+background percentile, and per-species thresholds in ppb/ppm.
+
+### Spatial masking
+
+**Restrict to cropland (ESA WorldCover)** (`cropland_mask`)
+Multiplies every composite by a WorldCover-derived boolean cropland mask so
+urban, water, and forest cells are excluded from hotspot detection. Tick
+**Include grassland** (`include_grassland`) to also admit WorldCover class 30.
+Enable whenever the analysis is narrowly agricultural.
+
+### Temporal compositing
+
+**Compositing mode** (`compositing_mode`)
+Selects how the date range is partitioned before compositing. `whole_period`
+is the legacy default. `monthly` produces one composite set per calendar
+month. `seasonal_in` produces Kharif / Rabi / Zaid segments aligned with
+Indian agricultural seasons. `custom` exposes a table for user-defined
+named windows. Non-`whole_period` modes write outputs into per-window
+subfolders (e.g. `2023-07_monthly/`, `kharif_2023/`).
+
+### Data fusion
+
+**ERA5 meteorological co-drivers** (`use_era5`)
+Fetches ERA5-Land hourly temperature, 10 m u/v wind, total precipitation,
+and soil moisture averaged over each window. Enable for upwind source
+attribution and mass-balance flux. Required by the flux and
+upwind-centroid columns.
+
+**FIRMS active fires** (`use_firms`, `firms_sensors`)
+Aggregates VIIRS and/or MODIS active-fire detections per cell and writes
+`fires.gpkg`. Enable when investigating episodic CH₄/CO₂ spikes from stubble
+burning. The sensor selector picks VIIRS, MODIS, or both.
+
+**TROPOMI NO₂ co-tracer** (`use_no2_cotracer`, `no2_high_percentile`,
+`no2_low_percentile`)
+Fetches a S5P NO₂ composite and tags each CH₄ hotspot as `combustion`
+(high NO₂), `biogenic` (low NO₂), or `ambiguous`. Enable to separate
+urban/industrial plumes from paddy/livestock signals.
+
+**Livestock density (FAO GLW4)** (`use_livestock`,
+`glw4_{cattle,buffalo,goat,sheep}_path`)
+Reads user-supplied GLW4 GeoTIFFs, resamples to the grid resolution, and
+adds a bottom-up IPCC Tier 1 enteric CH₄ baseline column. Enable to
+cross-check satellite CH₄ hotspots against animal density. The dialog
+links to the FAO GLW4 download portal.
+
+### Quality & uncertainty
+
+**Strict TROPOMI QA** (`strict_tropomi_qa`, `tropomi_qa_threshold`,
+`tropomi_albedo_threshold`, `tropomi_cloud_threshold`)
+Switches from the L3 gridded product to per-pixel L2 (`L2__CH4___`) and
+applies the SRON-recommended `qa_value ≥ 0.5 AND surface_albedo > 0.05
+AND cloud_fraction < 0.3` filter. Enable when hazy IGP conditions would
+otherwise degrade the L3 composite.
+
+**Inverse-variance XCO₂ gridding** (`inverse_variance_weighting`)
+Weights each OCO/GOSAT sounding by `1 / σ²` using the reported
+`xco2_uncertainty`, and writes a companion `xco2_composite_stderr.tif`.
+Default-on in v0.3 — this is a strict improvement over the arithmetic mean
+when retrieval uncertainties vary (e.g. target-mode vs nadir soundings).
+
+**Minimum retrievals per cell** (`min_retrievals_per_cell`)
+Masks cells with fewer than N valid retrievals as "insufficient data" in
+both the raster and the hotspot GeoPackage. Default 5. Raise for robust
+publication-grade maps; lower to 1 to reproduce legacy behavior.
+
+**CAAQMS bias calibration** (`caaqms_bias_correction`, `idw_power`)
+Computes the mean `station - satellite` bias at each CAAQMS station,
+interpolates it across the AOI via IDW with the given power, and writes
+`*_bias_corrected.tif` alongside the uncorrected composites. Disabled
+unless a CAAQMS CSV is loaded on the existing Ground Truth tab.
+
+### Scoring & scale
+
+**SOC × emission priority score** (`compute_priority`)
+Combines a normalized emission signal (flux > enhancement > concentration
+in priority order) with normalized inverse-SOC to produce a per-cell
+`priority_score` and `priority_rank`, plus a `priority_map.tif`. Enable
+for mitigation-targeting use cases.
+
+**OCO-native fine grid** (`multiscale_fine_grid`, `fine_grid_res`)
+Re-bins the SAME OCO/GOSAT retrievals at a finer resolution (default
+0.02°) and writes `xco2_composite_fine.tif`. Enable when analyzing OCO
+Target or Small Area Mapping acquisitions, where the ~0.1° merged grid
+wastes the ~1.3 km native resolution.
 
 ---
 
 ## Output Files
 
-| File                      | Type       | Contents                                       |
-|---------------------------|------------|------------------------------------------------|
-| `ch4_composite.tif`       | GeoTIFF    | Mean CH₄ (ppb) from TROPOMI                    |
-| `xco2_composite.tif`      | GeoTIFF    | Mean XCO₂ (ppm) merged OCO-2/3 + GOSAT ACOS   |
-| `gosat_ch4_composite.tif` | GeoTIFF    | Mean XCH₄ (ppb) from GOSAT TANSO-FTS (NIES)   |
-| `ghg_hotspots.gpkg`       | GeoPackage | Cells > 90th percentile flagged as hotspots    |
-| `soc_points.gpkg`         | GeoPackage | SOC/SIC field points (Walkley-Black corrected) |
-| `run_summary.txt`         | Text       | Run metadata and file paths                    |
-| `run_config.json`         | JSON       | Full config snapshot for reproducibility       |
+| File                  | Type      | Contents                                      |
+|-----------------------|-----------|-----------------------------------------------|
+| `ch4_composite.tif`   | GeoTIFF   | Annual mean CH₄ (ppb) at chosen grid res      |
+| `xco2_composite.tif`  | GeoTIFF   | Annual mean XCO₂ (ppm) merged OCO-2/3 + GOSAT |
+| `ghg_hotspots.gpkg`   | GeoPackage| Cells > 90th percentile flagged as hotspots   |
+| `soc_points.gpkg`     | GeoPackage| Your SOC/SIC field points (WB-corrected)      |
+| `run_summary.txt`     | Text      | Run metadata and file paths                   |
+| `run_config.json`     | JSON      | Full config snapshot for reproducibility      |
 
 ---
 
@@ -161,46 +182,17 @@ Outputs appear in your chosen folder when the pipeline completes.
 
 ```
 ghg_mapper_plugin/
-├── ghg_mapper_plugin.py    # Plugin class (toolbar, menu)
-├── ghg_mapper_dialog.py    # Main dialog (4 tabs, no-code UI)
-├── metadata.txt
-├── src/ghg_mapper/
+├── plugins/ghg_mapper/         # QGIS plugin (UI layer)
+│   ├── ghg_mapper_plugin.py    # Plugin class (toolbar, menu)
+│   ├── ghg_mapper_dialog.py    # Main dialog (4 tabs, no-code UI)
+│   └── metadata.txt
+├── src/ghg_mapper/             # Backend (testable without QGIS)
 │   └── pipeline/
-│       └── run_pipeline.py # Satellite download + composite + hotspot detection
+│       └── run_pipeline.py     # GEE extraction + composite + hotspot detection
+├── tests/
 ├── environment.yml
 └── pyproject.toml
 ```
-
----
-
-## Troubleshooting
-
-### 401 Unauthorized when downloading OCO-2/3
-
-You have not approved the GES DISC application on your EarthData account.
-Visit the URL in the Account Setup section above and click Approve, then re-run.
-
-### "0 granules found" for OCO-2/3 or GOSAT
-
-CMR search returned no results. Common causes:
-- Date range has no satellite overpasses over the India AOI — try a longer period (3+ months)
-- Wrong product version — versions are pinned as constants in `run_pipeline.py`
-- EarthData account not yet approved for GES DISC (see above)
-
-### "Cannot read NC4 file" error
-
-`h5py`, `netCDF4`, and `osgeo.gdal` were all unavailable. This should not happen
-inside QGIS because GDAL is always bundled. If running outside QGIS:
-
-```bash
-pip install h5py
-```
-
-### NIES SFTP connects but finds no data
-
-The plugin logs the full SFTP directory tree (three levels deep) on every run.
-Check the pipeline log panel for lines starting with `GOSAT XCH₄:` to see what
-directories are visible on the server.
 
 ---
 
@@ -211,8 +203,8 @@ import it in a Jupyter notebook, or call it from another QGIS processing algorit
 
 To add a new satellite source:
 1. Add a `_stage_<satellite>()` function in `run_pipeline.py`
-2. Add a checkbox and credential fields in `ghg_mapper_dialog.py` (`_tab_setup`)
-3. Wire the credential fields through `_update_sat_availability()` and `_build_config()`
+2. Add a checkbox for it in `ghg_mapper_dialog.py` (`_tab_setup`)
+3. Register it in the `stages` list in `run_full_pipeline()`
 
 ---
 
@@ -234,37 +226,47 @@ Reporting, Verification) workflows under Verra VCS and India's domestic carbon m
 
 ---
 
-## Changelog
+## Research Extensions (out of scope for v0.3)
 
-### v1.1.2 (April 2026)
-- **Fix NC4 reader**: added `osgeo.gdal` as third fallback in `_read_nc4_oco_vars`
-  so OCO granules parse inside QGIS without any `pip install` (GDAL is always bundled)
-- **NIES probe**: deepened SFTP directory probe to three levels and stopped
-  swallowing exceptions so the correct data path appears in the pipeline log
+The v0.3 Methodology tab covers Tier 1 + Tier 2 upgrades — defensible
+improvements built from data and retrievals that are already in routine
+operational production. Three further upgrades were identified during
+spec authoring but are **intentionally excluded** because they are
+research problems, not production methodology.
 
-### v1.1.1 (April 2026)
-- **Fix OCO-2/3 401 Unauthorized**: switched from OPeNDAP streaming (pydap) to
-  direct HTTPS download + file reading; pydap session cookies from `setup_session`
-  did not persist across internal `.dods` data-fetch requests
-- Updated NASA GES DISC hostname from `gesdisc.eosdis.nasa.gov` to
-  `data.gesdisc.earthdata.nasa.gov` following NASA's domain migration (April 2024)
-- Added `check_url` to `pydap.cas.urs.setup_session` so URS cookies are scoped
-  to the correct data server before the first granule request
-- Added GOSAT ACOS XCO₂ (`ACOS_L2_Lite_FP`) support alongside OCO-2/3
-- Added GOSAT XCH₄ via NIES SFTP portal (`_stage_gosat_ch4_nies`)
-- Added NIES credentials UI and ≥2-source validation gate before pipeline run
+### AK-aware sensor fusion of OCO-2/3 and GOSAT ACOS
 
-### v1.1.0 (April 2026)
-- Ported to QGIS 4.0 / Qt6: all PyQt5 imports replaced with `qgis.PyQt`
-- Fixed `QHeaderView.Stretch` → `QHeaderView.ResizeMode.Stretch` (Qt6 enum)
-- Fixed `QFormLayout.setToolTip` → moved to parent `QGroupBox`
-- Added **CAAQMS Validation tab**: load CPCB continuous monitoring CSV,
-  preview 14 pollutants + 6 met variables, compute uncertainty metrics
+Proper fusion of dry-air mole-fraction retrievals across instruments
+requires treating each sounding with its full averaging kernel and prior
+profile (Rodgers & Connor 2003; O'Dell et al. 2018). Direct averaging
+across instruments ignores differing vertical sensitivities and can bias
+the result by ~0.3–0.5 ppm. v0.3 performs an inverse-variance-weighted
+mean within a single instrument family only. AK-aware fusion is a
+research activity requiring careful validation against TCCON and is left
+to future work.
 
-### v0.1.0 (initial release)
-- TROPOMI / OCO-2/3 / GOSAT composite pipeline via GEE
-- SOC/SIC ground truth integration with Walkley-Black correction
-- Hotspot detection at 90th percentile threshold
+### Sentinel-2 plume detection for point-source CH₄
+
+Varon et al. (2021) and Irakulis-Loitxate et al. (2022) demonstrated
+point-source CH₄ detection from Sentinel-2 MSI over high-concentration
+plumes using differential SWIR absorption. The method works for
+super-emitters (> ~500 kg/h) but demands scene-by-scene manual QA,
+cloud and shadow screening, and a spectral fitting codebase not shared
+publicly. Integrating it into a no-code QGIS dialog with reproducible
+results is a research project in its own right; v0.3 instead exposes
+VIIRS/MODIS active-fire counts as the coarse combustion co-tracer.
+
+### PRISMA / EMIT hyperspectral CH₄ imaging
+
+Guanter et al. (2021) and Thorpe et al. (2023) showed PRISMA and EMIT
+can map CH₄ column enhancements at ~30 m in the SWIR, enabling
+field-level attribution of the plumes v0.3 detects at ~11 km.
+Operational ingest requires matched-filter retrievals, orbital
+tasking workflows, and scene-specific radiometric calibration — all
+active research at JPL / DLR / ASI. v0.3 does not attempt this; the
+cropland mask and upwind-source columns serve as a proxy for
+field-level attribution until a turnkey hyperspectral retrieval is
+available.
 
 ---
 
